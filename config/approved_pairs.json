@@ -1,0 +1,5 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Manually pre-approved Polymarket/Kalshi equivalent pairs. Each entry gates exactly one tradeable pair. New pairs MUST be added here before the matcher will classify them as EXACT.",
+  "pairs": []
+}
