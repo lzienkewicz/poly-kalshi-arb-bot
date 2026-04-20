@@ -2,42 +2,14 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-<<<<<<< HEAD
-from pydantic import BaseModel, ConfigDict, Field
-
-from src.models.market import Venue
-
-
-class PriceLevel(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
-    price: float = Field(ge=0.0, le=1.0)
-    size: float = Field(ge=0.0)
-
-
-class OrderBook(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
-    venue: Venue
-    market_id: str
-    yes_ask: PriceLevel
-    no_ask: PriceLevel
-    yes_bid: PriceLevel | None = None
-    no_bid: PriceLevel | None = None
-    fetched_at: datetime
-
-    def is_stale(self, max_age_s: int) -> bool:
-        age = (datetime.now(timezone.utc) - self.fetched_at).total_seconds()
-        return age > max_age_s
-=======
 from pydantic import BaseModel, Field, computed_field, model_validator
 
 
 class BookLevel(BaseModel):
     """A single price level in an order book."""
 
-    price: float = Field(ge=0.0, le=1.0, description="Price in [0, 1] dollars per contract")
-    size: float = Field(ge=0.0, description="Available contracts at this price level")
+    price: float = Field(ge=0.0, le=1.0)
+    size: float = Field(ge=0.0)
 
     model_config = {"frozen": True}
 
@@ -45,7 +17,7 @@ class BookLevel(BaseModel):
 class BookSide(BaseModel):
     """One side (bids or asks) of a binary contract's order book."""
 
-    levels: list[BookLevel] = Field(default_factory=list, description="Price levels, best price first")
+    levels: list[BookLevel] = Field(default_factory=list)
 
     @property
     def best_price(self) -> float | None:
@@ -60,7 +32,6 @@ class BookSide(BaseModel):
         return sum(lvl.size for lvl in self.levels)
 
     def available_at_price(self, price: float) -> float:
-        """Return total size available at exactly this price level."""
         return sum(lvl.size for lvl in self.levels if lvl.price == price)
 
     model_config = {"frozen": True}
@@ -68,20 +39,18 @@ class BookSide(BaseModel):
 
 class OrderBook(BaseModel):
     """
-    Top-of-book and depth snapshot for one side (YES or NO) of a binary contract.
+    Top-of-book and depth snapshot for one outcome (YES or NO) of a binary contract.
 
-    Prices are always expressed in dollars in [0, 1].
-    Kalshi prices (in cents) must be converted before construction.
+    Prices are always in dollars [0, 1]. Kalshi cents must be converted before construction.
     """
 
-    venue_market_id: str = Field(description="Venue-native market identifier this book belongs to")
-    outcome: str = Field(description="Which outcome this book represents: 'YES' or 'NO'")
+    venue_market_id: str
+    outcome: str = Field(description="'YES' or 'NO'")
 
-    bids: BookSide = Field(default_factory=BookSide, description="Resting buy orders, best bid first")
-    asks: BookSide = Field(default_factory=BookSide, description="Resting sell orders, best ask first")
+    bids: BookSide = Field(default_factory=BookSide)
+    asks: BookSide = Field(default_factory=BookSide)
 
-    # Snapshot timing
-    snapshot_ts: datetime = Field(description="UTC timestamp when this snapshot was taken")
+    snapshot_ts: datetime
 
     @computed_field  # type: ignore[misc]
     @property
@@ -108,7 +77,6 @@ class OrderBook(BaseModel):
         return None
 
     def age_seconds(self, now: datetime | None = None) -> float:
-        """Seconds elapsed since this snapshot was taken."""
         if now is None:
             now = datetime.now(tz=timezone.utc)
         return (now - self.snapshot_ts).total_seconds()
@@ -117,7 +85,6 @@ class OrderBook(BaseModel):
         return self.age_seconds(now) > max_age_s
 
     def available_at_ask(self) -> float:
-        """Contracts available at the current best ask."""
         if self.best_ask is None:
             return 0.0
         return self.asks.available_at_price(self.best_ask)
@@ -131,4 +98,3 @@ class OrderBook(BaseModel):
         return self
 
     model_config = {"frozen": True}
->>>>>>> 3eb221c205617b7a73ae5d47876a82b95b7391d1

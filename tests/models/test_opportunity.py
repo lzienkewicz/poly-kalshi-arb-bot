@@ -5,158 +5,126 @@ from datetime import datetime, timezone
 import pytest
 from pydantic import ValidationError
 
-from src.models.event_pair import EventPair, MatchConfidence
-from src.models.market import Market, Side
-from src.models.opportunity import (
-    Direction,
-    Opportunity,
-    OpportunityClassification,
-    ReasonCode,
-)
+from src.models.event_pair import EventPair
+from src.models.opportunity import Opportunity, OpportunityStatus, TradeDirection
 from src.models.orderbook import OrderBook
 
 
 def _make_opportunity(
-    poly_market: Market,
-    kalshi_market: Market,
+    matched_pair: EventPair,
     poly_book: OrderBook,
     kalshi_book: OrderBook,
     *,
-    net_edge: float = 0.03,
-    classification: OpportunityClassification = OpportunityClassification.TRADEABLE,
-    reason_code: ReasonCode = ReasonCode.TRADEABLE,
-    stale_legs: int = 0,
+    gross_edge: float = 0.00,
+    fee_estimate: float = 0.004,
+    slippage_buffer: float = 0.010,
+    stale_penalty: float = 0.0,
+    status: OpportunityStatus = OpportunityStatus.TRADEABLE,
+    poly_ask: float = 0.55,
+    kalshi_ask: float = 0.45,
 ) -> Opportunity:
-    pair = EventPair(
-        poly_market=poly_market,
-        kalshi_market=kalshi_market,
-        confidence=MatchConfidence.EXACT,
-    )
+    net = round(gross_edge - fee_estimate - slippage_buffer - stale_penalty, 8)
     return Opportunity(
-        pair=pair,
+        pair=matched_pair,
         poly_book=poly_book,
         kalshi_book=kalshi_book,
-        direction=Direction.A,
-        poly_side=Side.YES,
-        kalshi_side=Side.NO,
-        poly_ask=0.55,
-        kalshi_ask=0.45,
-        gross_edge=0.00 if stale_legs == 0 else net_edge + 0.005 * stale_legs,
-        stale_legs=stale_legs,
-        stale_penalty_total=stale_legs * 0.005,
-        net_edge=net_edge,
-        classification=classification,
-        reason_code=reason_code,
         evaluated_at=datetime.now(timezone.utc),
+        direction=TradeDirection.A,
+        poly_ask=poly_ask,
+        kalshi_ask=kalshi_ask,
+        gross_edge=gross_edge,
+        fee_estimate=fee_estimate,
+        slippage_buffer=slippage_buffer,
+        stale_penalty=stale_penalty,
+        net_edge=net,
+        executable_size_usdc=10.0,
+        status=status,
     )
 
 
-def test_opportunity_creates(
-    poly_market: Market,
-    kalshi_market: Market,
-    poly_book: OrderBook,
-    kalshi_book: OrderBook,
+def test_opportunity_creates(tradeable_opportunity: Opportunity):
+    assert tradeable_opportunity.direction == TradeDirection.A
+    assert tradeable_opportunity.status == OpportunityStatus.TRADEABLE
+    assert tradeable_opportunity.poly_side == "YES"
+    assert tradeable_opportunity.kalshi_side == "NO"
+
+
+def test_direction_b_sides(
+    matched_pair: EventPair, poly_book: OrderBook, kalshi_book: OrderBook
 ):
-    opp = _make_opportunity(poly_market, kalshi_market, poly_book, kalshi_book)
-    assert opp.direction == Direction.A
-    assert opp.poly_side == Side.YES
-    assert opp.kalshi_side == Side.NO
-    assert opp.classification == OpportunityClassification.TRADEABLE
-    assert opp.reason_code == ReasonCode.TRADEABLE
+    gross = 1.0 - (0.46 + 0.54)
+    fee, slip, stale = 0.004, 0.010, 0.0
+    net = round(gross - fee - slip - stale, 8)
+    opp = Opportunity(
+        pair=matched_pair,
+        poly_book=poly_book,
+        kalshi_book=kalshi_book,
+        evaluated_at=datetime.now(timezone.utc),
+        direction=TradeDirection.B,
+        poly_ask=0.46,
+        kalshi_ask=0.54,
+        gross_edge=gross,
+        fee_estimate=fee,
+        slippage_buffer=slip,
+        stale_penalty=stale,
+        net_edge=net,
+        executable_size_usdc=10.0,
+        status=OpportunityStatus.TRADEABLE,
+    )
+    assert opp.poly_side == "NO"
+    assert opp.kalshi_side == "YES"
+
+
+def test_net_edge_formula_enforced(
+    matched_pair: EventPair, poly_book: OrderBook, kalshi_book: OrderBook
+):
+    with pytest.raises(ValidationError, match="net_edge"):
+        Opportunity(
+            pair=matched_pair,
+            poly_book=poly_book,
+            kalshi_book=kalshi_book,
+            evaluated_at=datetime.now(timezone.utc),
+            direction=TradeDirection.A,
+            poly_ask=0.55,
+            kalshi_ask=0.45,
+            gross_edge=0.00,
+            fee_estimate=0.004,
+            slippage_buffer=0.010,
+            stale_penalty=0.0,
+            net_edge=0.99,  # wrong
+            executable_size_usdc=10.0,
+            status=OpportunityStatus.TRADEABLE,
+        )
 
 
 def test_ask_price_bounds(
-    poly_market: Market,
-    kalshi_market: Market,
-    poly_book: OrderBook,
-    kalshi_book: OrderBook,
+    matched_pair: EventPair, poly_book: OrderBook, kalshi_book: OrderBook
 ):
-    pair = EventPair(
-        poly_market=poly_market,
-        kalshi_market=kalshi_market,
-        confidence=MatchConfidence.EXACT,
-    )
     with pytest.raises(ValidationError):
-        Opportunity(
-            pair=pair,
-            poly_book=poly_book,
-            kalshi_book=kalshi_book,
-            direction=Direction.A,
-            poly_side=Side.YES,
-            kalshi_side=Side.NO,
-            poly_ask=1.01,  # out of bounds
-            kalshi_ask=0.45,
-            gross_edge=0.03,
-            stale_legs=0,
-            stale_penalty_total=0.0,
-            net_edge=0.03,
-            classification=OpportunityClassification.TRADEABLE,
-            reason_code=ReasonCode.TRADEABLE,
-            evaluated_at=datetime.now(timezone.utc),
+        _make_opportunity(
+            matched_pair, poly_book, kalshi_book, poly_ask=1.01
         )
 
 
-def test_stale_legs_bounds(
-    poly_market: Market,
-    kalshi_market: Market,
-    poly_book: OrderBook,
-    kalshi_book: OrderBook,
-):
-    pair = EventPair(
-        poly_market=poly_market,
-        kalshi_market=kalshi_market,
-        confidence=MatchConfidence.EXACT,
-    )
-    with pytest.raises(ValidationError):
-        Opportunity(
-            pair=pair,
-            poly_book=poly_book,
-            kalshi_book=kalshi_book,
-            direction=Direction.B,
-            poly_side=Side.NO,
-            kalshi_side=Side.YES,
-            poly_ask=0.45,
-            kalshi_ask=0.55,
-            gross_edge=0.00,
-            stale_legs=3,  # max is 2
-            stale_penalty_total=0.0,
-            net_edge=-0.015,
-            classification=OpportunityClassification.REJECTED_STALE,
-            reason_code=ReasonCode.REJECTED_STALE,
-            evaluated_at=datetime.now(timezone.utc),
-        )
+def test_estimated_profit(tradeable_opportunity: Opportunity):
+    expected = tradeable_opportunity.net_edge * tradeable_opportunity.executable_size_usdc
+    assert tradeable_opportunity.estimated_profit_usdc == pytest.approx(expected)
 
 
-def test_rejected_equiv_reason_code(
-    poly_market: Market,
-    kalshi_market: Market,
-    poly_book: OrderBook,
-    kalshi_book: OrderBook,
+def test_stale_flags_default_false(tradeable_opportunity: Opportunity):
+    assert tradeable_opportunity.poly_book_stale is False
+    assert tradeable_opportunity.kalshi_book_stale is False
+
+
+def test_rejected_opportunity(
+    matched_pair: EventPair, poly_book: OrderBook, kalshi_book: OrderBook
 ):
     opp = _make_opportunity(
-        poly_market,
-        kalshi_market,
-        poly_book,
-        kalshi_book,
-        net_edge=-0.1,
-        classification=OpportunityClassification.REJECTED_EQUIV,
-        reason_code=ReasonCode.EQUIV_DEADLINE_GAP,
+        matched_pair, poly_book, kalshi_book, status=OpportunityStatus.REJECTED_EDGE
     )
-    assert opp.classification == OpportunityClassification.REJECTED_EQUIV
-    assert opp.reason_code == ReasonCode.EQUIV_DEADLINE_GAP
+    assert opp.status == OpportunityStatus.REJECTED_EDGE
 
 
-def test_all_reason_codes_are_valid():
-    for code in ReasonCode:
-        assert isinstance(code.value, str)
-
-
-def test_opportunity_is_frozen(
-    poly_market: Market,
-    kalshi_market: Market,
-    poly_book: OrderBook,
-    kalshi_book: OrderBook,
-):
-    opp = _make_opportunity(poly_market, kalshi_market, poly_book, kalshi_book)
+def test_opportunity_is_frozen(tradeable_opportunity: Opportunity):
     with pytest.raises(Exception):
-        opp.net_edge = 0.99  # type: ignore[misc]
+        tradeable_opportunity.net_edge = 0.99  # type: ignore[misc]
