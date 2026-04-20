@@ -1,0 +1,26 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(py -3 -m pytest tests/test_config.py tests/models/ -v --no-cov)",
+      "Bash(py -3 --version)",
+      "Bash(py -3 -c \"import sys; print\\(sys.executable\\)\")",
+      "Bash(where python3.11)",
+      "Bash(where python3 *)",
+      "Read(//c/Users/mm/AppData/Local/Programs/Python/**)",
+      "Read(//c/Users/mm/.venv/**)",
+      "Read(//c//**)",
+      "Bash(where py *)",
+      "Bash(py --list)",
+      "Bash(conda --version)",
+      "Read(//c/ProgramData/Miniconda3/**)",
+      "Read(//c/Users/mm/miniconda3/**)",
+      "Read(//c/Users/mm/anaconda3/**)",
+      "Bash(py -3 -c 'from __future__ import annotations; import ast, sys, os *)",
+      "Bash(py -3.14 -m pip install -e \".[dev]\" -q)",
+      "Bash(py -3.14 -c \"import setuptools; print\\(setuptools.__version__\\)\")",
+      "Bash(py -3.14 -m pip install setuptools -q)",
+      "Bash(py -3.14 -m pytest tests/test_config.py tests/models/ -v --no-cov)",
+      "Bash(py -3.14 -m pytest tests/test_config.py tests/models/ --no-cov -q)"
+    ]
+  }
+}
