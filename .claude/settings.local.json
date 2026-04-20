@@ -20,7 +20,10 @@
       "Bash(py -3.14 -c \"import setuptools; print\\(setuptools.__version__\\)\")",
       "Bash(py -3.14 -m pip install setuptools -q)",
       "Bash(py -3.14 -m pytest tests/test_config.py tests/models/ -v --no-cov)",
-      "Bash(py -3.14 -m pytest tests/test_config.py tests/models/ --no-cov -q)"
+      "Bash(py -3.14 -m pytest tests/test_config.py tests/models/ --no-cov -q)",
+      "Bash(py -3.14 -c \"import respx, httpx, structlog; print\\('ok'\\)\")",
+      "Bash(py -3.14 -m pytest tests/venues/ -v --no-cov)",
+      "Bash(py -3.14 -m pytest --no-cov -q)"
     ]
   }
 }
