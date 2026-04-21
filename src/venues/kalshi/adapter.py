@@ -63,7 +63,7 @@ class KalshiAdapter:
             for raw_m in raw_markets:
                 try:
                     parsed = extract_market(raw_m)
-                    if parsed.status != "open":
+                    if parsed.status not in ("open", "active"):
                         continue
                     if parsed.market_type and parsed.market_type != "binary":
                         continue

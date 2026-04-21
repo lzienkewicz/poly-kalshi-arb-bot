@@ -55,7 +55,7 @@ class KalshiClient:
             data = await client.get_markets()
     """
 
-    BASE_URL = "https://trading-api.kalshi.com/trade-api/v2"
+    BASE_URL = "https://api.elections.kalshi.com/trade-api/v2"
 
     def __init__(
         self,

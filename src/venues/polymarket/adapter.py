@@ -32,7 +32,7 @@ from src.venues.polymarket.client import PolymarketClient
 log = structlog.get_logger(__name__)
 
 _MAX_PAGES = 50
-_CURSOR_DONE = "LTE="   # Polymarket base64 sentinel meaning "last page"
+_PAGE_SIZE = 100
 
 
 class PolymarketAdapter:
@@ -52,39 +52,57 @@ class PolymarketAdapter:
     # ------------------------------------------------------------------
 
     async def fetch_open_markets(self) -> list[Market]:
-        """Return all currently active Polymarket binary markets.
+        """Return all currently active Polymarket binary markets with future deadlines.
 
         Handles cursor-based pagination transparently.
-        Non-active entries are silently filtered.
-        Malformed individual records are logged and skipped.
+        Non-active entries and markets whose effective deadline is already in the
+        past are silently filtered.  Malformed individual records are logged and
+        skipped.
         """
+        now = datetime.now(timezone.utc)
         markets: list[Market] = []
-        cursor: str | None = None
+        raw_count = 0
 
         for page in range(_MAX_PAGES):
-            raw = await self._client.get_markets(next_cursor=cursor)
-            raw_markets: list[dict] = raw.get("data") or []
+            offset = page * _PAGE_SIZE
+            raw_markets = await self._client.get_markets(offset=offset, limit=_PAGE_SIZE)
+            if not raw_markets:
+                log.debug("polymarket_market_pages_done", pages=page)
+                break
+            raw_count += len(raw_markets)
 
             for raw_m in raw_markets:
                 try:
                     parsed = extract_market(raw_m)
                     if parsed.status != "active":
                         continue
-                    markets.append(to_market(parsed))
+                    market = to_market(parsed)
+                    # Reject markets whose effective deadline has already passed.
+                    # close_time is game_start_time for sports, end_date_iso otherwise.
+                    if market.close_time <= now:
+                        log.debug(
+                            "polymarket_market_past_deadline_skip",
+                            condition_id=parsed.condition_id,
+                            close_time=market.close_time.isoformat(),
+                        )
+                        continue
+                    markets.append(market)
                 except (KeyError, ValueError, TypeError) as exc:
                     log.warning(
                         "polymarket_market_parse_skip",
-                        condition_id=raw_m.get("condition_id"),
+                        condition_id=raw_m.get("condition_id") or raw_m.get("conditionId"),
                         error=str(exc),
                     )
 
-            next_cursor: str = raw.get("next_cursor") or ""
-            if not next_cursor or next_cursor == _CURSOR_DONE:
+            if len(raw_markets) < _PAGE_SIZE:
                 log.debug("polymarket_market_pages_done", pages=page + 1)
                 break
-            cursor = next_cursor
 
-        log.info("polymarket_markets_fetched", count=len(markets))
+        log.info(
+            "polymarket_markets_fetched",
+            raw_count=raw_count,
+            kept=len(markets),
+        )
         return markets
 
     # ------------------------------------------------------------------

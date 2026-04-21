@@ -38,7 +38,7 @@ class KalshiMarketRaw:
 
     ticker: str
     title: str
-    status: str                      # lowercase, e.g. "open" / "closed"
+    status: str                      # lowercase, e.g. "active" / "open" / "closed"
     close_time_str: str              # raw ISO-8601 string
     market_type: str                 # e.g. "binary"
     yes_ask_cents: int | None        # integer cents 0-100, or None if absent
@@ -74,6 +74,16 @@ def _int_opt(value: Any) -> int | None:
         return None
 
 
+def _dollars_to_cents(value: Any) -> int | None:
+    """Convert a dollar float like 0.55 → 55 cents."""
+    if value is None:
+        return None
+    try:
+        return round(float(value) * 100)
+    except (TypeError, ValueError):
+        return None
+
+
 def _str_opt(value: Any) -> str | None:
     if value is None or value == "":
         return None
@@ -103,10 +113,10 @@ def extract_market(raw: dict[str, Any]) -> KalshiMarketRaw:
         status=str(raw.get("status", "")).lower(),
         close_time_str=str(raw["close_time"]),
         market_type=str(raw.get("market_type", "")).lower(),
-        yes_ask_cents=_int_opt(raw.get("yes_ask")),
-        no_ask_cents=_int_opt(raw.get("no_ask")),
-        yes_bid_cents=_int_opt(raw.get("yes_bid")),
-        no_bid_cents=_int_opt(raw.get("no_bid")),
+        yes_ask_cents=_int_opt(raw.get("yes_ask")) or _dollars_to_cents(raw.get("yes_ask_dollars")),
+        no_ask_cents=_int_opt(raw.get("no_ask")) or _dollars_to_cents(raw.get("no_ask_dollars")),
+        yes_bid_cents=_int_opt(raw.get("yes_bid")) or _dollars_to_cents(raw.get("yes_bid_dollars")),
+        no_bid_cents=_int_opt(raw.get("no_bid")) or _dollars_to_cents(raw.get("no_bid_dollars")),
         category=_str_opt(raw.get("category")),
         resolution_source=_resolution_source(raw),
         expiration_time_str=_str_opt(raw.get("expiration_time")),
@@ -162,7 +172,7 @@ def to_market(parsed: KalshiMarketRaw) -> Market:
         question_normalized="",   # auto-derived by Market's field validator
         close_time=close_time,
         resolution_time=resolution_time,
-        is_open=(parsed.status == "open"),
+        is_open=(parsed.status in ("open", "active")),
         resolution_source=parsed.resolution_source,
         category=parsed.category,
         raw=parsed.raw,

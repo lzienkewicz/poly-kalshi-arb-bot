@@ -307,3 +307,63 @@ def test_to_orderbook_no_side():
     assert book.outcome == "NO"
     assert book.best_ask == pytest.approx(0.46)
     assert book.best_bid == pytest.approx(0.43)
+
+
+# ---------------------------------------------------------------------------
+# game_start_time semantics
+# ---------------------------------------------------------------------------
+
+SPORTS_PAYLOAD: dict = {
+    "condition_id": "0xsports1",
+    "question": "Will Team A win the 2027 final?",
+    "active": True,
+    "closed": False,
+    "tokens": [
+        {"token_id": "sp1yes", "outcome": "Yes"},
+        {"token_id": "sp1no", "outcome": "No"},
+    ],
+    "game_start_time": "2027-03-15T19:00:00Z",
+    "end_date_iso": "2027-03-16T00:00:00Z",
+    "category": "Sports",
+    "neg_risk": False,
+}
+
+
+def test_extract_market_game_start_time_extracted():
+    parsed = extract_market(SPORTS_PAYLOAD)
+    assert parsed.game_start_time == "2027-03-15T19:00:00Z"
+
+
+def test_extract_market_game_start_time_absent():
+    parsed = extract_market(MARKET_PAYLOAD)
+    assert parsed.game_start_time is None
+
+
+def test_to_market_sports_close_time_is_game_start():
+    """Sports market: close_time must equal game_start_time (event start)."""
+    market = to_market(extract_market(SPORTS_PAYLOAD))
+    assert market.close_time == datetime(2027, 3, 15, 19, 0, 0, tzinfo=timezone.utc)
+
+
+def test_to_market_sports_resolution_time_is_end_date():
+    """Sports market: resolution_time must equal end_date_iso (when it resolves)."""
+    market = to_market(extract_market(SPORTS_PAYLOAD))
+    assert market.resolution_time == datetime(2027, 3, 16, 0, 0, 0, tzinfo=timezone.utc)
+
+
+def test_to_market_non_sports_close_time_is_end_date():
+    """Non-sports market: close_time must equal end_date_iso."""
+    market = to_market(extract_market(MARKET_PAYLOAD))
+    assert market.close_time == datetime(2025, 6, 30, 18, 0, 0, tzinfo=timezone.utc)
+
+
+def test_to_market_non_sports_resolution_time_is_none():
+    """Non-sports market: resolution_time must be None (no separate resolution window)."""
+    market = to_market(extract_market(MARKET_PAYLOAD))
+    assert market.resolution_time is None
+
+
+def test_to_market_sports_close_time_before_resolution():
+    """Sanity: game starts before it resolves."""
+    market = to_market(extract_market(SPORTS_PAYLOAD))
+    assert market.close_time < market.resolution_time

@@ -17,7 +17,7 @@ from src.models.market import Venue
 from src.venues.kalshi.adapter import KalshiAdapter
 from src.venues.kalshi.client import KalshiClient, KalshiHTTPError
 
-BASE = "https://trading-api.kalshi.com/trade-api/v2"
+BASE = "https://api.elections.kalshi.com/trade-api/v2"
 
 # ---------------------------------------------------------------------------
 # Shared payloads

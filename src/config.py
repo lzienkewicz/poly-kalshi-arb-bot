@@ -64,6 +64,7 @@ class SecretsConfig(BaseSettings):
 class Config(BaseSettings):
     live_trading: bool = Field(default=False)
     log_level: str = Field(default="INFO")
+    match_domain: str = Field(default="sports")  # sports | crypto | politics | entertainment | all
 
     approved_pairs_path: Path = Field(default=Path("config/approved_pairs.json"))
     trades_db_path: Path = Field(default=Path("data/trades.db"))

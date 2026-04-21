@@ -40,7 +40,8 @@ class PolymarketMarketRaw:
     condition_id: str
     question: str
     status: str               # "active" or "closed"
-    end_date_iso: str | None  # raw ISO-8601 close time, or None
+    end_date_iso: str | None  # ISO-8601 resolution deadline
+    game_start_time: str | None  # ISO-8601 event start (sports only); earlier than end_date_iso
     category: str | None
     description: str | None
     yes_token_id: str | None  # token_id for the YES side
@@ -71,7 +72,15 @@ def _str_opt(value: Any) -> str | None:
 
 
 def _extract_tokens(raw: dict[str, Any]) -> tuple[str | None, str | None]:
-    """Return (yes_token_id, no_token_id) from the tokens array."""
+    """Return (yes_token_id, no_token_id).
+
+    Handles two formats:
+    - CLOB/Gamma tokens array: [{token_id, outcome}, ...]
+    - Gamma clobTokenIds list paired with outcomes JSON string
+    """
+    import json as _json
+
+    # Format 1: tokens array (CLOB and most Gamma responses)
     tokens = raw.get("tokens") or []
     yes_id: str | None = None
     no_id: str | None = None
@@ -83,6 +92,25 @@ def _extract_tokens(raw: dict[str, Any]) -> tuple[str | None, str | None]:
                 yes_id = tid
             elif outcome == "no":
                 no_id = tid
+    if yes_id or no_id:
+        return yes_id, no_id
+
+    # Format 2: Gamma clobTokenIds + outcomes JSON string
+    clob_ids = raw.get("clobTokenIds") or []
+    outcomes_raw = raw.get("outcomes")
+    if clob_ids and outcomes_raw:
+        try:
+            outcomes = _json.loads(outcomes_raw) if isinstance(outcomes_raw, str) else outcomes_raw
+            for i, outcome in enumerate(outcomes or []):
+                if i >= len(clob_ids):
+                    break
+                if str(outcome).lower() == "yes":
+                    yes_id = _str_opt(clob_ids[i])
+                elif str(outcome).lower() == "no":
+                    no_id = _str_opt(clob_ids[i])
+        except (_json.JSONDecodeError, TypeError):
+            pass
+
     return yes_id, no_id
 
 
@@ -96,22 +124,39 @@ def _market_status(raw: dict[str, Any]) -> str:
 
 
 def extract_market(raw: dict[str, Any]) -> PolymarketMarketRaw:
-    """Extract all relevant fields from a raw Polymarket CLOB market payload.
+    """Extract all relevant fields from a raw Polymarket market payload.
 
+    Handles both CLOB API (snake_case) and Gamma API (camelCase) field names.
     This function is the single point of truth for Polymarket field names.
-    Callers receive a typed intermediate; they never touch raw dict keys.
     """
+    # condition_id: CLOB uses condition_id, Gamma uses conditionId or id
+    condition_id = (
+        raw.get("conditionId") or raw.get("condition_id") or raw.get("id") or ""
+    )
+    if not condition_id:
+        raise KeyError("condition_id / conditionId missing from market payload")
+
+    # deadline: Gamma uses endDate (may be date-only) or endDateIso; CLOB uses end_date_iso
+    end_date = _str_opt(
+        raw.get("endDate") or raw.get("end_date_iso") or raw.get("endDateIso")
+    )
+
+    # sports start: Gamma uses gameStartTime, CLOB uses game_start_time
+    game_start = _str_opt(raw.get("gameStartTime") or raw.get("game_start_time"))
+
     yes_token_id, no_token_id = _extract_tokens(raw)
+
     return PolymarketMarketRaw(
-        condition_id=str(raw["condition_id"]),
+        condition_id=str(condition_id),
         question=str(raw.get("question") or ""),
         status=_market_status(raw),
-        end_date_iso=_str_opt(raw.get("end_date_iso")),
+        end_date_iso=end_date,
+        game_start_time=game_start,
         category=_str_opt(raw.get("category")),
         description=_str_opt(raw.get("description")),
         yes_token_id=yes_token_id,
         no_token_id=no_token_id,
-        neg_risk=bool(raw.get("neg_risk", False)),
+        neg_risk=bool(raw.get("negRisk") or raw.get("neg_risk") or False),
         raw=raw,
     )
 
@@ -158,18 +203,38 @@ def _parse_dt(s: str) -> datetime:
 
 
 def to_market(parsed: PolymarketMarketRaw) -> Market:
-    """Convert a PolymarketMarketRaw intermediate to the shared Market model."""
-    close_time = (
-        _parse_dt(parsed.end_date_iso)
-        if parsed.end_date_iso
-        else datetime(9999, 12, 31, tzinfo=timezone.utc)
-    )
+    """Convert a PolymarketMarketRaw intermediate to the shared Market model.
+
+    Time field semantics
+    --------------------
+    Sports markets have a game_start_time (when the event happens) that is earlier
+    than end_date_iso (when Polymarket resolves).  Kalshi's close_time maps to
+    game start.  So we use:
+      close_time      = game_start_time if present, else end_date_iso
+      resolution_time = end_date_iso    if game_start_time is present, else None
+
+    This lets the matcher compare close_time ↔ close_time for sports, and
+    resolution_time ↔ resolution_time for financial/political markets.
+    """
+    _SENTINEL = datetime(9999, 12, 31, tzinfo=timezone.utc)
+
+    end_dt = _parse_dt(parsed.end_date_iso) if parsed.end_date_iso else _SENTINEL
+    game_dt = _parse_dt(parsed.game_start_time) if parsed.game_start_time else None
+
+    if game_dt is not None:
+        close_time = game_dt
+        resolution_time = end_dt
+    else:
+        close_time = end_dt
+        resolution_time = None
+
     return Market(
         venue=Venue.POLYMARKET,
         venue_market_id=parsed.condition_id,
         question=parsed.question,
         question_normalized="",   # auto-derived by Market's field validator
         close_time=close_time,
+        resolution_time=resolution_time,
         is_open=(parsed.status == "active"),
         resolution_source=None,
         category=parsed.category,

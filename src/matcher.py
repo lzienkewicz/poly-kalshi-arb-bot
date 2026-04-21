@@ -53,7 +53,7 @@ log = structlog.get_logger(__name__)
 
 _DEADLINE_TOLERANCE = timedelta(hours=24)
 _JACCARD_EXACT: float = 0.85
-_JACCARD_PROBABLE: float = 0.60
+_JACCARD_PROBABLE: float = 0.40
 
 _DEFAULT_PAIRS_PATH = Path(__file__).parent.parent / "config" / "approved_pairs.json"
 
@@ -121,18 +121,42 @@ def match_all(
     kalshi_markets: Sequence[Market],
     *,
     approved_pairs_path: Path = _DEFAULT_PAIRS_PATH,
+    deadline_window: timedelta = timedelta(hours=48),
 ) -> list[EventPair]:
     """Cross-match every Polymarket market against every Kalshi market.
 
+    Pre-filters by time window before semantic matching — pairs whose effective
+    deadlines differ by more than deadline_window are skipped entirely.  This
+    reduces an O(N²) full cross-product to only time-adjacent pairs.
+
     Returns only pairs with confidence >= PROBABLE (discards POSSIBLE/UNKNOWN).
     """
+    # Build a canonical snapshot of each market's effective deadline once,
+    # outside the inner loop, so normalize_market isn't called N² times.
+    poly_canon = [(normalize_market(m), m) for m in poly_markets]
+    kalshi_canon = [(normalize_market(m), m) for m in kalshi_markets]
+
     results: list[EventPair] = []
-    for poly in poly_markets:
-        for kalshi in kalshi_markets:
+    skipped_time = 0
+
+    for cp, poly in poly_canon:
+        poly_deadline = cp.resolution_time or cp.close_time
+        for ck, kalshi in kalshi_canon:
+            kalshi_deadline = ck.resolution_time or ck.close_time
+            if abs(poly_deadline - kalshi_deadline) > deadline_window:
+                skipped_time += 1
+                continue
             pair = match(poly, kalshi, approved_pairs_path=approved_pairs_path)
             if pair.confidence not in (MatchConfidence.POSSIBLE, MatchConfidence.UNKNOWN):
                 results.append(pair)
-    log.info("matcher_cross_match_done", poly=len(poly_markets), kalshi=len(kalshi_markets), kept=len(results))
+
+    log.info(
+        "matcher_cross_match_done",
+        poly=len(poly_markets),
+        kalshi=len(kalshi_markets),
+        skipped_time=skipped_time,
+        kept=len(results),
+    )
     return results
 
 
@@ -159,12 +183,18 @@ def _evaluate(
         )
 
     # ── Rule 4.3: Deadline alignment ──────────────────────────────────────
-    deadline_gap = abs(canon_poly.close_time - canon_kalshi.close_time)
+    # Use resolution_time when available — it represents when the event actually
+    # resolves, which is comparable across venues.  close_time on Kalshi is when
+    # trading stops (can be days before resolution); end_date_iso on Polymarket is
+    # the resolution date.  Falling back to close_time when resolution_time is None.
+    poly_deadline = canon_poly.resolution_time or canon_poly.close_time
+    kalshi_deadline = canon_kalshi.resolution_time or canon_kalshi.close_time
+    deadline_gap = abs(poly_deadline - kalshi_deadline)
     if deadline_gap > _DEADLINE_TOLERANCE:
         return _reject(
             "EQUIV_DEADLINE_GAP",
             f"Deadline gap {deadline_gap} exceeds 24 h "
-            f"(poly={canon_poly.close_time.isoformat()}, kalshi={canon_kalshi.close_time.isoformat()})",
+            f"(poly={poly_deadline.isoformat()}, kalshi={kalshi_deadline.isoformat()})",
         )
 
     # ── Rule 4.4: Resolver match ───────────────────────────────────────────

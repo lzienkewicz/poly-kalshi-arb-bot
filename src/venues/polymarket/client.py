@@ -1,5 +1,9 @@
 """
-Async HTTP client for the Polymarket CLOB API.
+Async HTTP client for Polymarket APIs.
+
+Two base URLs:
+  - Gamma API (gamma-api.polymarket.com) — market discovery and metadata
+  - CLOB  API (clob.polymarket.com)       — order book depth
 
 Responsibilities
 ----------------
@@ -32,7 +36,7 @@ _MAX_DELAY_S = 30.0
 
 
 class PolymarketHTTPError(Exception):
-    """Raised when the Polymarket CLOB API returns a non-retryable error response."""
+    """Raised when a Polymarket API returns a non-retryable error response."""
 
     def __init__(self, status_code: int, body: str, url: str = "") -> None:
         super().__init__(f"HTTP {status_code} from {url!r}: {body[:200]}")
@@ -41,7 +45,7 @@ class PolymarketHTTPError(Exception):
 
 
 class PolymarketClient:
-    """Async HTTP client for the Polymarket CLOB API.
+    """Async HTTP client for Polymarket Gamma (discovery) and CLOB (books) APIs.
 
     Usage (production)::
 
@@ -55,22 +59,25 @@ class PolymarketClient:
             data = await client.get_markets()
     """
 
-    BASE_URL = "https://clob.polymarket.com"
+    GAMMA_BASE_URL = "https://gamma-api.polymarket.com"
+    CLOB_BASE_URL = "https://clob.polymarket.com"
 
     def __init__(
         self,
         *,
         api_key: str | None = None,
-        base_url: str | None = None,
+        gamma_url: str | None = None,
+        clob_url: str | None = None,
         timeout_s: float = 10.0,
         max_attempts: int = _DEFAULT_MAX_ATTEMPTS,
         _http: httpx.AsyncClient | None = None,  # test injection point
     ) -> None:
         self._api_key = api_key
-        self._base_url = (base_url or self.BASE_URL).rstrip("/")
+        self._gamma_url = (gamma_url or self.GAMMA_BASE_URL).rstrip("/")
+        self._clob_url = (clob_url or self.CLOB_BASE_URL).rstrip("/")
         self._timeout = httpx.Timeout(timeout_s)
         self._max_attempts = max_attempts
-        self._injected_http = _http      # always used when provided (tests)
+        self._injected_http = _http
         self._owned_http: httpx.AsyncClient | None = None
 
     # ------------------------------------------------------------------
@@ -94,22 +101,37 @@ class PolymarketClient:
     async def get_markets(
         self,
         *,
-        next_cursor: str | None = None,
+        offset: int = 0,
         limit: int = 100,
-    ) -> dict[str, Any]:
-        """Fetch a page of markets from the CLOB /markets endpoint."""
-        params: dict[str, Any] = {"limit": limit}
-        if next_cursor:
-            params["next_cursor"] = next_cursor
-        return await self._get("/markets", params=params)
+        active: bool = True,
+        closed: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Fetch a page of markets from the Gamma /markets endpoint.
+
+        Returns a list of market dicts directly (Gamma wraps in no envelope).
+        Offset-based pagination: increment offset by limit each page.
+        """
+        params: dict[str, Any] = {
+            "limit": limit,
+            "offset": offset,
+            "active": str(active).lower(),
+            "closed": str(closed).lower(),
+        }
+        result = await self._get("/markets", params=params, base_url=self._gamma_url)
+        return result if isinstance(result, list) else (result.get("data") or result.get("markets") or [])
 
     async def get_market(self, condition_id: str) -> dict[str, Any]:
-        """Fetch a single market by condition_id."""
-        return await self._get(f"/markets/{condition_id}")
+        """Fetch a single market by condition_id from the Gamma API."""
+        result = await self._get(f"/markets/{condition_id}", base_url=self._gamma_url)
+        # Gamma may return a list for some ID lookups; unwrap if so
+        if isinstance(result, list):
+            return result[0] if result else {}
+        return result
 
     async def get_book(self, token_id: str) -> dict[str, Any]:
-        """Fetch the full order book for a token (YES or NO side of a market)."""
-        return await self._get("/book", params={"token_id": token_id})
+        """Fetch the full order book for a token (YES or NO side) from the CLOB API."""
+        result = await self._get("/book", params={"token_id": token_id}, base_url=self._clob_url)
+        return result if isinstance(result, dict) else {}
 
     # ------------------------------------------------------------------
     # Internal request + retry machinery
@@ -120,12 +142,12 @@ class PolymarketClient:
         path: str,
         *,
         params: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        url = self._base_url + path
+        base_url: str | None = None,
+    ) -> Any:
+        url = (base_url or self._clob_url) + path
         bound = log.bind(url=url, params=params)
 
         for attempt in range(1, self._max_attempts + 1):
-            # ---- network-level errors --------------------------------
             try:
                 response = await self._send(url, params=params)
             except (httpx.TimeoutException, httpx.NetworkError, httpx.ConnectError) as exc:
@@ -142,7 +164,6 @@ class PolymarketClient:
                 await asyncio.sleep(delay)
                 continue
 
-            # ---- retryable HTTP errors --------------------------------
             if response.status_code in _RETRYABLE_STATUSES:
                 if attempt == self._max_attempts:
                     bound.error("polymarket_http_error_final", status=response.status_code)
@@ -157,7 +178,6 @@ class PolymarketClient:
                 await asyncio.sleep(delay)
                 continue
 
-            # ---- non-retryable HTTP errors ----------------------------
             if response.status_code >= 400:
                 bound.error(
                     "polymarket_http_error",
@@ -169,7 +189,6 @@ class PolymarketClient:
             bound.debug("polymarket_ok", status=response.status_code, attempt=attempt)
             return response.json()
 
-        # Unreachable — loop always raises or returns before exhaustion
         raise PolymarketHTTPError(0, "retry loop exhausted", url)  # pragma: no cover
 
     async def _send(
