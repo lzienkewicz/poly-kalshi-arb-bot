@@ -106,26 +106,47 @@ async def main():
     print(f"  Stage 6  Jaccard>=0.15 {counts.jaccard_floor_dropped} pairs dropped")
     print(f"  Final candidates:      {counts.final_candidates}")
 
-    sem_candidates = [
-        c for c in candidates
-        if semantics_compatible(extract_semantics(c.poly.question), extract_semantics(c.kalshi.question))[0]
-    ]
-    print(f"  Stage 6.5 semantic     {len(sem_candidates)} pass / {len(candidates) - len(sem_candidates)} blocked")
+    sem_pass: list = []
+    sem_blocked: list[tuple] = []
+    for c in candidates:
+        sem_a = extract_semantics(c.poly.question)
+        sem_b = extract_semantics(c.kalshi.question)
+        ok, detail = semantics_compatible(sem_a, sem_b)
+        if ok:
+            sem_pass.append(c)
+        else:
+            sem_blocked.append((c, detail))
+
+    print(f"  Stage 6.5 semantic     {len(sem_pass)} pass / {len(sem_blocked)} blocked")
 
     if not candidates:
         print("\n  No candidates — check samples above for overlapping questions.")
         return
 
+    # ── Top 10 semantic rejections (diagnostic) ───────────────────────────
+    if sem_blocked:
+        print(f"\n{'=' * 70}")
+        print(f"TOP 10 SEMANTIC REJECTIONS  ({len(sem_blocked)} total blocked)")
+        print("=" * 70)
+        for c, detail in sem_blocked[:10]:
+            sem_a = extract_semantics(c.poly.question)
+            sem_b = extract_semantics(c.kalshi.question)
+            print(f"\n  reason: {detail}")
+            print(f"  poly  [{sem_a.event_type}, card={sem_a.cardinality}, ent={sorted(sem_a.entities)}]: {c.poly.question[:60]!r}")
+            print(f"  kalshi[{sem_b.event_type}, card={sem_b.cardinality}, ent={sorted(sem_b.entities)}]: {c.kalshi.question[:60]!r}")
+
     # ── Top 20 semantically-compatible candidates ──────────────────────────
-    display = sem_candidates[:20]
+    display = sem_pass[:20]
     print(f"\n{'=' * 70}")
-    print(f"TOP {len(display)} SEMANTIC CANDIDATES by Jaccard  ({len(sem_candidates)} total)")
+    print(f"TOP {len(display)} SEMANTIC CANDIDATES by Jaccard  ({len(sem_pass)} total pass)")
     print("=" * 70)
     for i, c in enumerate(display, 1):
+        sem_a = extract_semantics(c.poly.question)
+        sem_b = extract_semantics(c.kalshi.question)
         print(f"\n  #{i:02d}  Jaccard={c.jaccard:.3f}  poly={c.poly_days:.1f}d  kalshi={c.kalshi_days:.1f}d")
-        print(f"  poly:   {c.poly.question[:70]!r}")
-        print(f"  kalshi: {c.kalshi.question[:70]!r}")
-        print(f"  ids:    poly={c.poly.venue_market_id}  kalshi={c.kalshi.venue_market_id}")
+        print(f"  poly  [{sem_a.event_type}, card={sem_a.cardinality}]: {c.poly.question[:65]!r}")
+        print(f"  kalshi[{sem_b.event_type}, card={sem_b.cardinality}]: {c.kalshi.question[:65]!r}")
+        print(f"  ids:  poly={c.poly.venue_market_id}  kalshi={c.kalshi.venue_market_id}")
 
     # ── Matcher results ────────────────────────────────────────────────────
     print(f"\n{'=' * 70}")
