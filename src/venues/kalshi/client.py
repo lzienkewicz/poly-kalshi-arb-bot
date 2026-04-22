@@ -26,7 +26,7 @@ import structlog
 log = structlog.get_logger(__name__)
 
 _RETRYABLE_STATUSES: frozenset[int] = frozenset({429, 500, 502, 503, 504})
-_DEFAULT_MAX_ATTEMPTS = 3
+_DEFAULT_MAX_ATTEMPTS = 5
 _BASE_DELAY_S = 1.0
 _MAX_DELAY_S = 30.0
 
@@ -98,6 +98,7 @@ class KalshiClient:
         market_type: str = "binary",
         limit: int = 200,
         cursor: str | None = None,
+        category: str | None = None,
     ) -> dict[str, Any]:
         params: dict[str, Any] = {
             "status": status,
@@ -106,7 +107,21 @@ class KalshiClient:
         }
         if cursor:
             params["cursor"] = cursor
+        if category:
+            params["category"] = category
         return await self._get("/markets", params=params)
+
+    async def get_events(
+        self,
+        *,
+        status: str = "open",
+        limit: int = 200,
+        cursor: str | None = None,
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {"status": status, "limit": limit}
+        if cursor:
+            params["cursor"] = cursor
+        return await self._get("/events", params=params)
 
     async def get_market(self, ticker: str) -> dict[str, Any]:
         return await self._get(f"/markets/{ticker}")

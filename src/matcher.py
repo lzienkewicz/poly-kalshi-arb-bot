@@ -36,6 +36,7 @@ from __future__ import annotations
 import json
 import re
 from datetime import timedelta
+from functools import lru_cache
 from pathlib import Path
 from typing import Sequence
 
@@ -44,6 +45,7 @@ import structlog
 from src.models.event_pair import EventPair, MatchConfidence, MatchStatus
 from src.models.market import Market
 from src.normalization import CanonicalMarket, normalize_market
+from src.semantic import extract_semantics, semantics_compatible
 
 log = structlog.get_logger(__name__)
 
@@ -97,6 +99,7 @@ def match(
     kalshi: Market,
     *,
     approved_pairs_path: Path = _DEFAULT_PAIRS_PATH,
+    deadline_tolerance: timedelta = _DEADLINE_TOLERANCE,
 ) -> EventPair:
     """Evaluate whether poly and kalshi represent the same real-world event.
 
@@ -105,7 +108,7 @@ def match(
     canon_poly = normalize_market(poly)
     canon_kalshi = normalize_market(kalshi)
 
-    result = _evaluate(canon_poly, canon_kalshi, poly, kalshi, approved_pairs_path)
+    result = _evaluate(canon_poly, canon_kalshi, poly, kalshi, approved_pairs_path, deadline_tolerance)
     log.debug(
         "matcher_result",
         pair_key=result.pair_key,
@@ -171,6 +174,7 @@ def _evaluate(
     poly: Market,
     kalshi: Market,
     approved_pairs_path: Path,
+    deadline_tolerance: timedelta = _DEADLINE_TOLERANCE,
 ) -> EventPair:
     def _reject(reason: str, detail: str) -> EventPair:
         return EventPair(
@@ -182,22 +186,18 @@ def _evaluate(
             reject_detail=detail,
         )
 
-    # ── Rule 4.3: Deadline alignment ──────────────────────────────────────
-    # Use resolution_time when available — it represents when the event actually
-    # resolves, which is comparable across venues.  close_time on Kalshi is when
-    # trading stops (can be days before resolution); end_date_iso on Polymarket is
-    # the resolution date.  Falling back to close_time when resolution_time is None.
+    # ── Hard rule: Deadline alignment ─────────────────────────────────────
     poly_deadline = canon_poly.resolution_time or canon_poly.close_time
     kalshi_deadline = canon_kalshi.resolution_time or canon_kalshi.close_time
     deadline_gap = abs(poly_deadline - kalshi_deadline)
-    if deadline_gap > _DEADLINE_TOLERANCE:
+    if deadline_gap > deadline_tolerance:
         return _reject(
             "EQUIV_DEADLINE_GAP",
-            f"Deadline gap {deadline_gap} exceeds 24 h "
+            f"Deadline gap {deadline_gap} exceeds {deadline_tolerance} "
             f"(poly={poly_deadline.isoformat()}, kalshi={kalshi_deadline.isoformat()})",
         )
 
-    # ── Rule 4.4: Resolver match ───────────────────────────────────────────
+    # ── Hard rule: Resolver compatibility ─────────────────────────────────
     if not _resolvers_compatible(canon_poly, canon_kalshi):
         return _reject(
             "EQUIV_RESOLVER_MISMATCH",
@@ -205,7 +205,7 @@ def _evaluate(
             f"kalshi resolver={canon_kalshi.resolution_source_canonical!r}",
         )
 
-    # ── Rule 4.5: Conditional clauses ─────────────────────────────────────
+    # ── Hard rule: Conditional clauses ────────────────────────────────────
     poly_conditional = _has_conditional(canon_poly.question_normalized)
     kalshi_conditional = _has_conditional(canon_kalshi.question_normalized)
     if poly_conditional != kalshi_conditional:
@@ -214,7 +214,29 @@ def _evaluate(
             f"Conditional clause detected: poly={poly_conditional} kalshi={kalshi_conditional}",
         )
 
-    # ── Rule 4.1 / 4.2: Semantic equivalence + direction ──────────────────
+    # ── Approved pairs fast path ──────────────────────────────────────────
+    # Pairs in approved_pairs.json have been manually verified as equivalent.
+    # They bypass the structural and Jaccard checks below.
+    approved = _load_approved_pairs(approved_pairs_path)
+    pair_key = f"{poly.venue_market_id}::{kalshi.venue_market_id}"
+    if pair_key in approved:
+        inverted = _directions_inverted(canon_poly.question_normalized, canon_kalshi.question_normalized)
+        return EventPair(
+            polymarket=poly,
+            kalshi=kalshi,
+            status=MatchStatus.MATCHED,
+            confidence=MatchConfidence.EXACT,
+            directions_inverted=inverted,
+        )
+
+    # ── Structural semantic check (entity / event_type / cardinality) ─────
+    poly_sem = extract_semantics(poly.question)
+    kalshi_sem = extract_semantics(kalshi.question)
+    sem_ok, sem_detail = semantics_compatible(poly_sem, kalshi_sem)
+    if not sem_ok:
+        return _reject("EQUIV_SEMANTIC_MISMATCH", sem_detail)
+
+    # ── Jaccard-based confidence ───────────────────────────────────────────
     confidence, inverted = _semantic_match(canon_poly, canon_kalshi)
 
     if confidence == MatchConfidence.UNKNOWN:
@@ -237,29 +259,19 @@ def _evaluate(
             reject_detail="Partial keyword overlap only — below PROBABLE threshold",
         )
 
-    # PROBABLE or EXACT candidate — check approved-pairs allowlist
+    # PROBABLE or EXACT — not in approved_pairs (would have returned above)
     if confidence == MatchConfidence.EXACT:
-        approved = _load_approved_pairs(approved_pairs_path)
-        pair_key = f"{poly.venue_market_id}::{kalshi.venue_market_id}"
-        if pair_key not in approved:
-            return EventPair(
-                polymarket=poly,
-                kalshi=kalshi,
-                status=MatchStatus.REJECTED,
-                confidence=MatchConfidence.PROBABLE,
-                directions_inverted=inverted,
-                reject_reason="EQUIV_NOT_IN_APPROVED_PAIRS",
-                reject_detail=f"Pair {pair_key!r} not in approved_pairs.json — add it after human review",
-            )
         return EventPair(
             polymarket=poly,
             kalshi=kalshi,
-            status=MatchStatus.MATCHED,
-            confidence=MatchConfidence.EXACT,
+            status=MatchStatus.REJECTED,
+            confidence=MatchConfidence.PROBABLE,
             directions_inverted=inverted,
+            reject_reason="EQUIV_NOT_IN_APPROVED_PAIRS",
+            reject_detail=f"Pair {pair_key!r} not in approved_pairs.json — add after human review",
         )
 
-    # PROBABLE — never tradeable, always rejected
+    # PROBABLE
     return EventPair(
         polymarket=poly,
         kalshi=kalshi,
@@ -358,6 +370,7 @@ def _resolvers_compatible(a: CanonicalMarket, b: CanonicalMarket) -> bool:
 # ---------------------------------------------------------------------------
 
 
+@lru_cache(maxsize=4)
 def _load_approved_pairs(path: Path) -> frozenset[str]:
     """Load the set of pre-approved pair keys from config/approved_pairs.json.
 

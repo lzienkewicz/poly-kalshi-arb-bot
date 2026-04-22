@@ -9,6 +9,7 @@ Wires the HTTP client to the parser and exposes the three operations the bot nee
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 
 import structlog
@@ -27,6 +28,7 @@ from src.venues.kalshi.client import KalshiClient
 log = structlog.get_logger(__name__)
 
 _MAX_PAGES = 20          # safety cap on pagination loops
+_MAX_EVENT_PAGES = 15    # 15 × 200 = 3000 events; enough to cover full catalogue
 _ORDERBOOK_DEPTH = 10    # levels to request from the depth endpoint
 
 
@@ -46,18 +48,24 @@ class KalshiAdapter:
     # Market discovery
     # ------------------------------------------------------------------
 
-    async def fetch_open_markets(self) -> list[Market]:
+    async def fetch_open_markets(self, *, category: str | None = None) -> list[Market]:
         """Return all currently open Kalshi binary markets.
 
         Handles cursor-based pagination transparently.
         Non-binary or non-open entries are silently filtered.
         Malformed individual records are logged and skipped.
+
+        Parameters
+        ----------
+        category:
+            Optional Kalshi category filter (e.g. ``"Politics"``, ``"Economics"``).
+            When provided, only markets in that category are returned.
         """
         markets: list[Market] = []
         cursor: str | None = None
 
         for page in range(_MAX_PAGES):
-            raw = await self._client.get_markets(cursor=cursor)
+            raw = await self._client.get_markets(cursor=cursor, category=category)
             raw_markets: list[dict] = raw.get("markets") or []
 
             for raw_m in raw_markets:
@@ -81,6 +89,97 @@ class KalshiAdapter:
                 break
 
         log.info("kalshi_markets_fetched", count=len(markets))
+        return markets
+
+    # ------------------------------------------------------------------
+    # Category-filtered market fetch (Politics, Elections, Economics, …)
+    # ------------------------------------------------------------------
+
+    async def fetch_markets_for_event_categories(
+        self,
+        categories: list[str],
+        *,
+        concurrency: int = 3,
+        max_events: int = 200,
+    ) -> list[Market]:
+        """Return open binary markets whose parent event belongs to any of *categories*.
+
+        Strategy:
+          1. Page through all open events (up to _MAX_EVENT_PAGES × 200).
+          2. Keep events whose ``category`` field is in *categories* (client-side
+             filter — Kalshi's API-level category param is unreliable without auth).
+          3. Fetch markets for all qualifying events concurrently, bounded by
+             *concurrency* to stay within the API rate limit.
+        """
+        # Step 1: collect all events
+        all_events: list[dict] = []
+        cursor: str | None = None
+        for _ in range(_MAX_EVENT_PAGES):
+            raw = await self._client.get_events(cursor=cursor)
+            batch: list[dict] = raw.get("events") or []
+            all_events.extend(batch)
+            cursor = raw.get("cursor") or ""
+            if not cursor or len(batch) < 200:
+                break
+
+        # Step 2: filter by category (case-insensitive), cap total events
+        cat_set = {c.lower() for c in categories}
+        qualifying = [
+            e for e in all_events
+            if (e.get("category") or "").lower() in cat_set
+        ][:max_events]
+        log.info(
+            "kalshi_events_filtered",
+            total_events=len(all_events),
+            categories=categories,
+            qualifying=len(qualifying),
+            capped_at=max_events,
+        )
+
+        # Step 3: fetch markets concurrently, bounded semaphore to avoid 429s
+        sem = asyncio.Semaphore(concurrency)
+
+        async def _fetch_one(event_ticker: str) -> list[dict]:
+            async with sem:
+                raw_resp = await self._client._get(
+                    "/markets",
+                    params={"status": "open", "market_type": "binary",
+                            "limit": 200, "event_ticker": event_ticker},
+                )
+                return raw_resp.get("markets") or []
+
+        tasks = [
+            _fetch_one(e.get("event_ticker") or e.get("ticker", ""))
+            for e in qualifying
+            if (e.get("event_ticker") or e.get("ticker"))
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        markets: list[Market] = []
+        seen_ids: set[str] = set()
+        for batch in results:
+            if isinstance(batch, BaseException):
+                log.warning("kalshi_event_fetch_error", error=str(batch))
+                continue
+            for raw_mkt in batch:
+                try:
+                    parsed = extract_market(raw_mkt)
+                    if parsed.status not in ("open", "active"):
+                        continue
+                    if parsed.market_type and parsed.market_type != "binary":
+                        continue
+                    m = to_market(parsed)
+                    if m.venue_market_id not in seen_ids:
+                        seen_ids.add(m.venue_market_id)
+                        markets.append(m)
+                except (KeyError, ValueError, TypeError) as exc:
+                    log.warning(
+                        "kalshi_market_parse_skip",
+                        ticker=raw_mkt.get("ticker"),
+                        error=str(exc),
+                    )
+
+        log.info("kalshi_category_markets_fetched", categories=categories, count=len(markets))
         return markets
 
     # ------------------------------------------------------------------

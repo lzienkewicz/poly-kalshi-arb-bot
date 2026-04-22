@@ -1,5 +1,26 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "description": "Manually pre-approved Polymarket/Kalshi equivalent pairs. Each entry gates exactly one tradeable pair. New pairs MUST be added here before the matcher will classify them as EXACT.",
-  "pairs": []
+  "pairs": [
+    {"polymarket_id": "0xc510176cf39d73295354fc797d84b510d050b45d29d6c9735ee18cdbc4fd6463", "kalshi_id": "KXPRESNOMR-28-RFK", "note": "RFK Jr. 2028 Republican presidential nomination"},
+    {"polymarket_id": "0x00ad3bb5284b0b2314b1a2d42812fe292f606619c6278bd95c9d905816c240f6", "kalshi_id": "KXPRESNOMR-28-SHS", "note": "Sarah Huckabee Sanders 2028 Republican presidential nomination"},
+    {"polymarket_id": "0x17902b9490c6a73152772316b4705935c5c6801ba269f2afc81686532e34fb9a", "kalshi_id": "KXPRESNOMR-28-MTG", "note": "Marjorie Taylor Greene 2028 Republican presidential nomination"},
+    {"polymarket_id": "0x18b1c135d0a40c5894da9412e77311827d9caf16cf4cd6591b247a34730af919", "kalshi_id": "KXPRESNOMR-28-JDV", "note": "JD Vance 2028 Republican presidential nomination"},
+    {"polymarket_id": "0x21ad31a46bfaa51650766eff6dc69c866959e32d965ffb116020e37694b6317d", "kalshi_id": "KXPRESNOMR-28-MR", "note": "Marco Rubio 2028 Republican presidential nomination"},
+    {"polymarket_id": "0x9cd77217b2ab264fe4f6d302f662c0a91f349fe5798f1f98d70bb2311712791b", "kalshi_id": "KXPRESNOMR-28-TG", "note": "Tulsi Gabbard 2028 Republican presidential nomination"},
+    {"polymarket_id": "0xd0c4c60c8e68ee15974df3aa7d217225e98020fab9fcdb32d10f8e3d285e1619", "kalshi_id": "KXPRESNOMR-28-GY", "note": "Glenn Youngkin 2028 Republican presidential nomination"},
+    {"polymarket_id": "0x64d31a2af85518c6718a5757a35b840f08eca20c1e22c0eb1e96ec01cc55b8b6", "kalshi_id": "KXPRESNOMR-28-RDS", "note": "Ron DeSantis 2028 Republican presidential nomination"},
+    {"polymarket_id": "0xd7a0d72b19ca48b06b0029684677f581e32f133c367d7a19c2f1e4ad07066af7", "kalshi_id": "KXPRESNOMR-28-NH", "note": "Nikki Haley 2028 Republican presidential nomination"},
+    {"polymarket_id": "0xd997dc2a212a7d6673375a3b016db1fb214247142f8cde0cbf07f8e6d789877c", "kalshi_id": "KXPRESNOMR-28-VR", "note": "Vivek Ramaswamy 2028 Republican presidential nomination"},
+    {"polymarket_id": "0x214093035e429b91df322bd20c55d9f611f741f67472a63f7623a9afc0cffa57", "kalshi_id": "KXPRESNOMR-28-GA", "note": "Greg Abbott 2028 Republican presidential nomination"},
+    {"polymarket_id": "0x42631e1a8c8e6389422b58b8e15b1b551892b9833651aa3bab25afab124354b5", "kalshi_id": "KXPRESNOMR-28-BK", "note": "Brian Kemp 2028 Republican presidential nomination"},
+    {"polymarket_id": "0xd1747284d6048b2a3dcfbee489db405f36de18f9590197dd0e5c9f0c246bf050", "kalshi_id": "KXPRESNOMR-28-BD", "note": "Byron Donalds 2028 Republican presidential nomination"},
+    {"polymarket_id": "0x655b4bfdfa55a95c24d6e9bf7e7cd62f1b57da9a1f4c7f40f090b8ba847dffa2", "kalshi_id": "KXPRESNOMR-28-ES", "note": "Elise Stefanik 2028 Republican presidential nomination"},
+    {"polymarket_id": "0x4d4bceee5f59f75230c6438f69fc913a6da7afa4098ce0734655045c02a730fc", "kalshi_id": "KXPRESNOMR-28-JH", "note": "Josh Hawley 2028 Republican presidential nomination"},
+    {"polymarket_id": "0x0ac23db1e56971022bc7e822b907a2466c618b34104ea72bc9fa95e41c86a9c6", "kalshi_id": "KXPRESNOMR-28-TC", "note": "Ted Cruz 2028 Republican presidential nomination"},
+    {"polymarket_id": "0xfbb80ea5f8fc02ee7df8bd4f58790e1d04b874078a49a7b7028a74a2075100c9", "kalshi_id": "KXPRESNOMR-28-EM", "note": "Elon Musk 2028 Republican presidential nomination"},
+    {"polymarket_id": "0xf2cea45ec282af4f302d2ab85ede73678cd692ebf8c3ab6d52bfa5e19f44c553", "kalshi_id": "KXPRESNOMR-28-MG", "note": "Matt Gaetz 2028 Republican presidential nomination"},
+    {"polymarket_id": "0x61a1278884fa70d68d4bcaaf72fad55bbdb063cac28c6947472ca91635fab10f", "kalshi_id": "KXPRESNOMR-28-KB", "note": "2028 Republican presidential nomination candidate"},
+    {"polymarket_id": "0x7190eccbd0677d5d0ae8cdf598b37e945a346915c666dda11468dc9970657a56", "kalshi_id": "KXPRESNOMR-28-JT", "note": "2028 Republican presidential nomination candidate"}
+  ]
 }

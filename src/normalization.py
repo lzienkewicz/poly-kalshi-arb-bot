@@ -29,6 +29,52 @@ from src.models.orderbook import OrderBook
 # Stop-word list — removed when building question_tokens
 # ---------------------------------------------------------------------------
 
+# Political synonym map — variant forms → canonical token used for Jaccard overlap.
+# Applied during tokenization so Poly "Will X be elected..." matches Kalshi "Will X win...".
+_POLITICS_SYNONYMS: dict[str, str] = {
+    # Win / election verbs
+    "wins": "win",
+    "winner": "win",
+    "elected": "elect",
+    "elect": "elect",
+    "reelected": "reelect",
+    "re-elected": "reelect",
+    # Office titles
+    "presidential": "president",
+    "presidency": "president",
+    "senator": "senate",
+    "senatorial": "senate",
+    "congressional": "congress",
+    "congressman": "congress",
+    "congresswoman": "congress",
+    "representative": "congress",
+    "representatives": "congress",
+    "gubernatorial": "governor",
+    # Parties (collapse to root)
+    "gop": "republican",
+    "democratic": "democrat",
+    "dem": "democrat",
+    "dems": "democrat",
+    # Legislative actions
+    "approved": "approve",
+    "approval": "approve",
+    "passed": "pass",
+    "passing": "pass",
+    "vetoed": "veto",
+    "signed": "sign",
+    "signing": "sign",
+    "confirmed": "confirm",
+    "confirmation": "confirm",
+    "impeached": "impeach",
+    "impeachment": "impeach",
+    # Misc political
+    "majority": "majority",
+    "minority": "minority",
+    "control": "control",
+    "controls": "control",
+    "controlled": "control",
+}
+
 _STOP_WORDS: frozenset[str] = frozenset(
     {
         "a", "an", "and", "are", "as", "at", "be", "been", "by",
@@ -192,12 +238,16 @@ def normalize_snapshot(
 # ---------------------------------------------------------------------------
 
 def _tokenize(question_normalized: str) -> frozenset[str]:
-    """Split a normalized question into content words, discarding stop words."""
-    return frozenset(
-        word
-        for word in question_normalized.split()
-        if word and word not in _STOP_WORDS
-    )
+    """Split a normalized question into content words, discarding stop words.
+
+    Political synonym folding is applied so "elected"→"elect", "gop"→"republican", etc.
+    """
+    tokens: set[str] = set()
+    for word in question_normalized.split():
+        if not word or word in _STOP_WORDS:
+            continue
+        tokens.add(_POLITICS_SYNONYMS.get(word, word))
+    return frozenset(tokens)
 
 
 def _canonicalize_source(raw: str | None) -> str | None:

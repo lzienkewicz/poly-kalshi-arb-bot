@@ -13,5 +13,12 @@
       "Bash(git push*)"
     ],
     "deny": []
+  },
+  "mcpServers": {
+    "ruflo": {
+      "command": "npx",
+      "args": ["claude-flow@latest", "mcp", "start"],
+      "cwd": "C:\\Users\\mm\\OneDrive\\Desktop\\Programs\\ruflo"
+    }
   }
 }

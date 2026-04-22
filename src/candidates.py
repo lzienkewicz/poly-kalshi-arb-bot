@@ -1,22 +1,19 @@
 """
 Candidate-pair generation for cross-venue arb matching.
 
-Narrows both venue pools to a single domain, excludes combo markets, pairs only
-markets whose trading-close deadlines fall within a configurable window, and
-drops pairs below a minimum Jaccard threshold before returning.
-
 Pipeline stages:
-  fetched        all active markets from adapters
-  domain         matching MATCH_DOMAIN
-  simple         single-event only (combos excluded)
-  time_window    close_time gap <= DEADLINE_WINDOW
-  jaccard_floor  Jaccard >= JACCARD_MIN (pre-matcher garbage elimination)
+  fetched            all active markets from adapters
+  domain             matching MATCH_DOMAIN
+  sports_subdomain   championship_futures / match_winner / spread_total / player_prop / all
+  simple             single-event only (combos excluded)
+  time_window        close_time gap <= DEADLINE_WINDOW
+  jaccard_floor      Jaccard >= JACCARD_MIN
 """
 
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Literal
 
@@ -28,27 +25,25 @@ from src.normalization import normalize_market
 log = structlog.get_logger(__name__)
 
 MatchDomain = Literal["sports", "crypto", "politics", "entertainment", "all"]
+SportsSubdomain = Literal[
+    "championship_futures", "award_futures", "match_winner", "spread_total", "player_prop", "all"
+]
 
 _DEFAULT_DEADLINE_WINDOW = timedelta(hours=48)
-_JACCARD_MIN = 0.15   # pairs below this are noise; skip before matcher sees them
+_JACCARD_MIN = 0.15
 
 
 # ---------------------------------------------------------------------------
-# Domain classification  (tight rules to avoid cross-domain pollution)
+# Domain classification
 # ---------------------------------------------------------------------------
 
-# Explicit category strings returned by each venue API — most reliable signal
 _DOMAIN_CATS: dict[str, frozenset[str]] = {
     "sports": frozenset({
-        "sports",
-        # US leagues
-        "nba", "nfl", "nhl", "mlb", "ncaa", "pga",
+        "sports", "nba", "nfl", "nhl", "mlb", "ncaa", "pga",
         "college football", "college basketball",
-        # global
         "soccer", "football", "basketball", "baseball",
         "hockey", "tennis", "golf", "mma", "ufc",
         "boxing", "racing", "motorsports", "esports",
-        # Kalshi sometimes uses these
         "american football", "ice hockey",
     }),
     "crypto": frozenset({
@@ -64,25 +59,19 @@ _DOMAIN_CATS: dict[str, frozenset[str]] = {
     }),
 }
 
-# Strong sports signals in the question text — must be unambiguous
 _SPORTS_QUESTION_RES: list[re.Pattern] = [
-    # matchup format  "Lakers vs Celtics", "Team A v Team B"
     re.compile(r"\bvs\.?\s+\w|\bv\.\s+\w", re.IGNORECASE),
-    # betting totals  "over 218.5 points", "under 4.5 goals"
     re.compile(
         r"\b(over|under)\s+\d+(\.\d+)?\s*(points?|goals?|runs?|rebounds?|assists?|yards?|kills?)",
         re.IGNORECASE,
     ),
-    # player prop threshold  "30+ points", "2+ goals"
     re.compile(r"\d+\+\s*(points?|goals?|runs?|rebounds?|assists?|yards?)", re.IGNORECASE),
-    # major sports events
     re.compile(
         r"\b(stanley cup|super bowl|world series|nba finals?|nfl playoffs?|"
         r"mlb playoffs?|nhl playoffs?|champions league|world cup|olympics?|"
         r"ncaa tournament|march madness)\b",
         re.IGNORECASE,
     ),
-    # league abbreviations as whole words
     re.compile(r"\b(nba|nfl|nhl|mlb|ufc|mma|pga|wnba|cfl|afl)\b", re.IGNORECASE),
 ]
 
@@ -99,27 +88,20 @@ _POLITICS_RE = re.compile(
 
 
 def classify_domain(market: Market) -> str:
-    """Return one of: sports / crypto / politics / entertainment / other.
-
-    Category field is checked first (most reliable).  Question-text patterns
-    are a fallback and use tight regexes to avoid cross-domain pollution.
-    """
+    """Return: sports / crypto / politics / entertainment / other."""
     cat = (market.category or "").lower().strip()
     q = market.question
 
-    # Category match — authoritative
     for domain, cats in _DOMAIN_CATS.items():
         if cat in cats:
             return domain
 
-    # Question-text fallback — tight patterns only
     for pat in _SPORTS_QUESTION_RES:
         if pat.search(q):
             return "sports"
 
     if _CRYPTO_RE.search(q):
         return "crypto"
-
     if _POLITICS_RE.search(q):
         return "politics"
 
@@ -127,37 +109,126 @@ def classify_domain(market: Market) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Sports subdomain classification
+# ---------------------------------------------------------------------------
+
+# Named championships / tournaments — must appear in the question
+_CHAMP_NAMES_RE = re.compile(
+    r"\b("
+    # Hockey
+    r"stanley cup|nhl (finals?|championship|playoffs?|title)|"
+    # Basketball
+    r"nba (finals?|championship|title|playoffs?)|"
+    r"ncaa (tournament|championship|title)|march madness|"
+    r"eastern conference (finals?|championship)|western conference (finals?|championship)|"
+    # Football
+    r"super bowl|nfl (championship|title|playoffs?)|"
+    # Baseball
+    r"world series|mlb (championship|title|playoffs?)|"
+    # Soccer
+    r"world cup|champions league|europa league|premier league title|"
+    r"la liga title|bundesliga title|serie a title|"
+    # Tennis Grand Slams
+    r"wimbledon|us open|french open|australian open|"
+    # Golf majors
+    r"the masters|pga championship|the open championship|u\.?s\.? open|"
+    # Other
+    r"grey cup|memorial cup|wnba (finals?|championship|title)|"
+    r"mls cup|copa america|euro \d{4}|euros \d{4}"
+    r")\b",
+    re.IGNORECASE,
+)
+
+_WIN_RE = re.compile(
+    r"\b(win|wins|winner|champion|champions|championship|title|trophy|lift)\b",
+    re.IGNORECASE,
+)
+
+# Individual sports awards — "Will X win the NBA MVP / Hart Trophy / Rookie of the Year?"
+_AWARD_FUTURES_RE = re.compile(
+    r"\b("
+    # NBA awards
+    r"nba mvp|nba (most valuable player)|"
+    r"rookie of the year|roy\b|"
+    r"sixth man of the year|"
+    r"most improved player|"
+    r"defensive player of the year|dpoy\b|"
+    r"clutch player of the year|"
+    r"coach of the year|executive of the year|"
+    r"all[-\s]?nba|all[-\s]?star mvp|finals mvp|"
+    # NHL trophies
+    r"hart (memorial )?trophy|vezina trophy|norris trophy|calder (memorial )?trophy|"
+    r"conn smythe|art ross trophy|rocket richard trophy|"
+    r"lady byng|selke trophy|jack adams|"
+    # NFL / MLB / other
+    r"heisman|cy young|mvp award|league mvp|"
+    # Draft picks
+    r"first( overall)? pick|#?1 (overall )?pick|first pick of the \w+ draft|"
+    r"\d+(st|nd|rd|th) pick|top pick"
+    r")\b",
+    re.IGNORECASE,
+)
+
+# Match-winner: explicit head-to-head matchup
+_MATCH_RE = re.compile(r"\bvs\.?\s|\bv\.\s|\bbeat\b|\bdefeat\b|\bface\b", re.IGNORECASE)
+
+# Spread / total markets
+_SPREAD_TOTAL_RE = re.compile(
+    r"\b(over|under|spread|total|more than|fewer than|at least|at most)\s+\d",
+    re.IGNORECASE,
+)
+
+# Player prop: player name + stat threshold (crude but effective heuristic)
+_PLAYER_PROP_RE = re.compile(
+    r"\d+\+\s*(points?|goals?|assists?|rebounds?|hits?|runs?|strikeout|yards?|tackles?)|"
+    r"(points?|goals?|assists?|rebounds?|hits?|runs?|strikeout|yards?)\s*:\s*\d+",
+    re.IGNORECASE,
+)
+
+
+def classify_sports_subdomain(market: Market) -> str:
+    """Return: championship_futures / match_winner / spread_total / player_prop / other_sports.
+
+    Checked in priority order — a market matching championship signals is classified
+    as championship_futures even if it also contains "vs".
+    """
+    q = market.question
+
+    if _CHAMP_NAMES_RE.search(q) and _WIN_RE.search(q):
+        return "championship_futures"
+
+    if _AWARD_FUTURES_RE.search(q) and _WIN_RE.search(q):
+        return "award_futures"
+
+    if _PLAYER_PROP_RE.search(q):
+        return "player_prop"
+
+    if _SPREAD_TOTAL_RE.search(q):
+        return "spread_total"
+
+    if _MATCH_RE.search(q):
+        return "match_winner"
+
+    return "other_sports"
+
+
+# ---------------------------------------------------------------------------
 # Combo / multi-condition detection
-#
-# Goal: exclude markets that bundle multiple independent conditions into one
-# contract (same-game parlays, multi-prop chains).  Do NOT exclude simple
-# single-prop markets that happen to start with "Yes" or contain one comma.
 # ---------------------------------------------------------------------------
 
 _COMBO_RE: list[re.Pattern] = [
-    # Two separate "Yes" clauses  e.g. "Yes Edwards: 20+ | Yes Over 218.5"
-    # Requires at least 10 chars between the two "yes" tokens.
     re.compile(r"\byes\b.{10,}\byes\b", re.IGNORECASE),
-    # "both A and B"
     re.compile(r"\bboth\b.{3,50}\band\b", re.IGNORECASE),
-    # "2 of the following", "all of the following", "each of"
     re.compile(r"\b\d+\s*\+?\s*of\s+(the\s+)?following\b", re.IGNORECASE),
     re.compile(r"\ball\s+of\s+the\s+following\b", re.IGNORECASE),
     re.compile(r"\beach\s+of\b", re.IGNORECASE),
-    # Explicit multi-leg connector
-    re.compile(r"\band\b.{10,}\band\b.{10,}\band\b", re.IGNORECASE),  # A and B and C
+    re.compile(r"\band\b.{10,}\band\b.{10,}\band\b", re.IGNORECASE),
 ]
 
 
 def is_combo_market(market: Market) -> bool:
-    """Return True if the question bundles multiple independent conditions.
-
-    Conservative: only triggers on clear multi-condition signals so that
-    simple Kalshi single-prop markets (e.g. "Yes Anthony Edwards: 20+ pts")
-    are not incorrectly excluded.
-    """
+    """Return True if the question bundles multiple independent conditions."""
     q = market.question
-    # Many commas with repeated "yes" style conditions
     if q.lower().count("yes") >= 2 and q.count(",") >= 2:
         return True
     for pat in _COMBO_RE:
@@ -175,7 +246,7 @@ class CandidatePair:
     poly: Market
     kalshi: Market
     jaccard: float
-    poly_days: float    # close_time days from now
+    poly_days: float
     kalshi_days: float
 
 
@@ -185,9 +256,10 @@ class StageCount:
     kalshi_fetched: int = 0
     poly_domain: int = 0
     kalshi_domain: int = 0
+    poly_subdomain: int = 0
+    kalshi_subdomain: int = 0
     poly_simple: int = 0
     kalshi_simple: int = 0
-    time_window_pairs: int = 0
     time_skipped: int = 0
     jaccard_floor_dropped: int = 0
     final_candidates: int = 0
@@ -202,17 +274,12 @@ def generate_candidates(
     kalshi_markets: list[Market],
     *,
     domain: MatchDomain = "sports",
+    sports_subdomain: SportsSubdomain = "championship_futures",
     deadline_window: timedelta = _DEFAULT_DEADLINE_WINDOW,
     jaccard_min: float = _JACCARD_MIN,
     now: datetime,
 ) -> tuple[list[CandidatePair], StageCount]:
-    """Filter and pair markets, returning candidates sorted by Jaccard desc.
-
-    Deadline comparison uses close_time on both sides.  For sports Polymarket
-    markets close_time == game_start_time, which aligns with Kalshi's trading-
-    close time for the same event.  Using resolution_time would shift Polymarket
-    deadlines days past Kalshi's window and yield zero pairs.
-    """
+    """Filter and pair markets, returning candidates sorted by Jaccard desc."""
     counts = StageCount(
         poly_fetched=len(poly_markets),
         kalshi_fetched=len(kalshi_markets),
@@ -228,6 +295,13 @@ def generate_candidates(
     counts.poly_domain = len(poly_d)
     counts.kalshi_domain = len(kalshi_d)
 
+    # Stage 3.5: sports subdomain filter
+    if domain == "sports" and sports_subdomain != "all":
+        poly_d = [m for m in poly_d if classify_sports_subdomain(m) == sports_subdomain]
+        kalshi_d = [m for m in kalshi_d if classify_sports_subdomain(m) == sports_subdomain]
+    counts.poly_subdomain = len(poly_d)
+    counts.kalshi_subdomain = len(kalshi_d)
+
     # Stage 4: simple-market filter
     poly_s = [m for m in poly_d if not is_combo_market(m)]
     kalshi_s = [m for m in kalshi_d if not is_combo_market(m)]
@@ -238,17 +312,16 @@ def generate_candidates(
         log.info(
             "candidates_empty_after_filter",
             domain=domain,
+            sports_subdomain=sports_subdomain,
             poly_simple=counts.poly_simple,
             kalshi_simple=counts.kalshi_simple,
         )
         return [], counts
 
-    # Precompute canonical forms once
     poly_canon = [(normalize_market(m), m) for m in poly_s]
     kalshi_canon = [(normalize_market(m), m) for m in kalshi_s]
 
-    # Stage 5: time-window cross-filter
-    # Stage 6: Jaccard floor — drop noise before matcher
+    # Stage 5: time window + Stage 6: Jaccard floor
     pairs: list[CandidatePair] = []
     time_skipped = 0
     jaccard_dropped = 0
@@ -275,7 +348,6 @@ def generate_candidates(
             ))
 
     counts.time_skipped = time_skipped
-    counts.time_window_pairs = time_skipped + len(pairs) + jaccard_dropped - time_skipped
     counts.jaccard_floor_dropped = jaccard_dropped
     counts.final_candidates = len(pairs)
     pairs.sort(key=lambda p: p.jaccard, reverse=True)
@@ -283,18 +355,15 @@ def generate_candidates(
     log.info(
         "candidates_generated",
         domain=domain,
+        sports_subdomain=sports_subdomain,
         poly_simple=counts.poly_simple,
         kalshi_simple=counts.kalshi_simple,
-        time_window_pairs=counts.time_window_pairs,
+        time_skipped=time_skipped,
         jaccard_dropped=jaccard_dropped,
         final_candidates=counts.final_candidates,
     )
     return pairs, counts
 
-
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
 
 def _jaccard(a: frozenset[str], b: frozenset[str]) -> float:
     if not a and not b:
