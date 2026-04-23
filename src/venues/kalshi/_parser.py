@@ -101,6 +101,24 @@ def _resolution_source(raw: dict[str, Any]) -> str | None:
     return _str_opt(raw.get("rules_primary"))
 
 
+def _build_question(raw: dict[str, Any]) -> str:
+    """Build the canonical question string from a Kalshi market payload.
+
+    Kalshi ladder/scalar markets store per-rung details (comparator + threshold)
+    in yes_sub_title while the event-level title (asset + date only) lives in
+    title.  Combining both lets downstream extractors find all relevant fields.
+    Example:
+      title         = "ETH price on Jan 1, 2027?"
+      yes_sub_title = "ETH above $3,000"
+      → "ETH above $3,000 — ETH price on Jan 1, 2027?"
+    """
+    title = str(raw.get("title") or raw.get("subtitle") or "")
+    yes_sub = str(raw.get("yes_sub_title") or "")
+    if yes_sub and yes_sub.lower() != title.lower():
+        return f"{yes_sub} — {title}"
+    return title
+
+
 def extract_market(raw: dict[str, Any]) -> KalshiMarketRaw:
     """Extract all relevant fields from a raw Kalshi market API payload.
 
@@ -109,7 +127,7 @@ def extract_market(raw: dict[str, Any]) -> KalshiMarketRaw:
     """
     return KalshiMarketRaw(
         ticker=str(raw["ticker"]),
-        title=str(raw.get("title") or raw.get("subtitle") or ""),
+        title=_build_question(raw),
         status=str(raw.get("status", "")).lower(),
         close_time_str=str(raw["close_time"]),
         market_type=str(raw.get("market_type", "")).lower(),
