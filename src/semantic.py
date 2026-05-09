@@ -3,24 +3,30 @@ Structural semantic extraction for market equivalence checking.
 
 Each market question is routed to exactly one event family:
 
-  nomination         — party primary / nomination contest
-  ticket             — running-mate / joint ticket market
-  vp_nomination      — vice-presidential nomination specifically
+  nomination           — party primary / nomination contest
+  ticket               — running-mate / joint ticket market
+  vp_nomination        — vice-presidential nomination specifically
+  first_to_declare     — "Who will be first to announce their candidacy?"
+  endorsement          — "Will X endorse Y?"
+  declare_run          — "Will X announce/declare a run?"
+  election_participation — "Will X run for / appear on the ballot?"
   general_election_win — "Will X win the [Y] election?"
-  next_leader        — "Will X be the next [office]?" (succession / parliamentary)
-  leave_office       — resignation, impeachment, removal, firing
-  appointment        — cabinet / judicial confirmation
-  legislation        — bills, vetoes, law passage
-  other              — everything else
+  next_leader          — "Will X be the next [office]?" (succession / parliamentary)
+  leave_office         — impeachment, generic "leave office"
+  resignation_removal  — explicit resignation, firing, or removal from office
+  succession           — "Who will succeed X as Y?"
+  appointment          — cabinet / judicial confirmation
+  legislation          — bills, vetoes, law passage
+  other                — everything else
 
 Within each family, compatibility is checked on:
-  cardinality        — 1-entity vs 2-entity → reject
-  entity surnames    — "Donald Trump" ≈ "Trump" (last-token comparison)
-  event_type         — families must match exactly
-  party              — (nomination) republican vs democratic → reject
-  office             — (election / next_leader) president vs senator → reject
-  jurisdiction       — (next_leader) us vs uk → reject
-  departure_method   — (leave_office) resign vs impeach → reject
+  cardinality          — 1-entity vs 2-entity → reject
+  entity surnames      — "Donald Trump" ≈ "Trump" (last non-suffix token)
+  event_type           — families must match exactly
+  party                — (nomination/declare_run) republican vs democratic → reject
+  office               — (election / next_leader / succession) president vs senator → reject
+  jurisdiction         — (next_leader / succession) us vs uk → reject
+  departure_method     — (leave_office / resignation_removal) resign vs impeach → reject
 
 Checks are only applied when BOTH sides have the relevant data — missing
 data on one side is treated as "unknown / compatible", since extraction
@@ -30,7 +36,7 @@ can fail for unusual question formats.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
@@ -101,12 +107,22 @@ _LEAD_RE = re.compile(
     re.IGNORECASE,
 )
 
-_SUFFIX_RE = re.compile(r"\s+(jr|sr|iii|ii|iv)\s*$", re.IGNORECASE)
+_SUFFIX_WORDS: frozenset[str] = frozenset({"jr", "sr", "ii", "iii", "iv"})
 
 
 def _normalize_entity(name: str) -> str:
+    """Normalize a person name for entity comparison.
+
+    Removes periods and middle initials (single-char tokens) but preserves
+    generational suffixes so "Donald Trump Jr." != "Donald Trump".
+
+    "Donald Trump Jr."    -> "donald trump jr"
+    "Donald J. Trump Jr." -> "donald trump jr"
+    "Donald Trump"        -> "donald trump"
+    """
     name = name.strip().lower().replace(".", "")
-    return _SUFFIX_RE.sub("", name).strip()
+    tokens = [t for t in name.split() if len(t) > 1 or t in _SUFFIX_WORDS]
+    return " ".join(tokens)
 
 
 def _split_subject(subject: str) -> list[str]:
@@ -135,8 +151,16 @@ def _extract_entities(question: str) -> list[str]:
 
 
 def _surnames(entities: frozenset[str]) -> frozenset[str]:
-    """Last token of each entity name — enables "Donald Trump" ≈ "Trump"."""
-    return frozenset(e.split()[-1] for e in entities if e)
+    """Last *non-suffix* token of each entity — "Donald Trump Jr." ≈ "Trump"."""
+    result: set[str] = set()
+    for e in entities:
+        if not e:
+            continue
+        for tok in reversed(e.split()):
+            if tok not in _SUFFIX_WORDS:
+                result.add(tok)
+                break
+    return frozenset(result)
 
 
 # ---------------------------------------------------------------------------
@@ -237,18 +261,38 @@ _EVENT_PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"\brunning.?mate\b", re.IGNORECASE), "ticket"),
     # ── VP nomination (before general nomination) ──────────────────────────
     (re.compile(r"\bvice[\s-]?(president|presidency)\b", re.IGNORECASE), "vp_nomination"),
+    # ── first_to_declare (before endorsement and nomination) ───────────────
+    (re.compile(r"\bfirst\s+(candidate\s+)?to\s+(announce|declare)\b", re.IGNORECASE), "first_to_declare"),
+    (re.compile(r"\bfirst\s+(major\s+)?(candidate|politician)\s+to\s+(announce|declare)\b", re.IGNORECASE), "first_to_declare"),
+    # ── endorsement (before nomination — "endorse the nominee" must not → nomination) ─
+    (re.compile(r"\bendors(e|es|ed|ing|ement)\b", re.IGNORECASE), "endorsement"),
+    # ── declare_run (before nomination) ────────────────────────────────────
+    (re.compile(
+        r"\b(announce|declare|launch)\s+(their|a|his|her)\s+(run|campaign|candidacy|bid)\b",
+        re.IGNORECASE,
+    ), "declare_run"),
+    (re.compile(r"\benter\s+(the\s+)?(race|primary|contest)\b", re.IGNORECASE), "declare_run"),
     # ── nomination ────────────────────────────────────────────────────────
     (re.compile(r"\bnominat(e|ed|ion|ing|or)\b|\bnominee\b", re.IGNORECASE), "nomination"),
     (re.compile(r"\bprimary\b|\bprimaries\b", re.IGNORECASE), "nomination"),
     (re.compile(r"\bwin\s+(the\s+)?\w+\s*nomination\b", re.IGNORECASE), "nomination"),
     (re.compile(r"\bbe\s+(the\s+)?\w+\s*nominee\b", re.IGNORECASE), "nomination"),
-    # ── leave_office (before election — "resign after losing" → leave_office) ─
-    (re.compile(
-        r"\b(resign(s|ed|ation)?|step(s|ped)?\s+down|leave\s+office"
-        r"|remov(e|ed|al)\s+from\s+office|fired|dismissed|ousted)\b",
-        re.IGNORECASE,
-    ), "leave_office"),
+    # ── resignation_removal (specific departure — before generic leave_office) ─
+    (re.compile(r"\b(resign(s|ed|ation)?|step(s|ped)?\s+down)\b", re.IGNORECASE), "resignation_removal"),
+    (re.compile(r"\b(fired|dismissed|ousted)\b", re.IGNORECASE), "resignation_removal"),
+    (re.compile(r"\b(removed|removal)\s+from\s+office\b", re.IGNORECASE), "resignation_removal"),
+    # ── leave_office (impeachment + generic "leave office" phrase) ─────────
     (re.compile(r"\bimpeach(ed|ment)?\b", re.IGNORECASE), "leave_office"),
+    (re.compile(r"\bleave\s+office\b", re.IGNORECASE), "leave_office"),
+    # ── election_participation (run for / appear on ballot) ────────────────
+    (re.compile(
+        r"\brun\s+for\s+(re-?election|president|senator|governor|mayor|congress\w*|office)\b",
+        re.IGNORECASE,
+    ), "election_participation"),
+    (re.compile(r"\bseek(s|ing)?\s+(re-?election|a\s+second\s+term|another\s+term)\b", re.IGNORECASE), "election_participation"),
+    (re.compile(r"\b(appear|qualify)\s+on\s+(the\s+)?\w+\s+ballot\b", re.IGNORECASE), "election_participation"),
+    # ── succession (before next_leader) ────────────────────────────────────
+    (re.compile(r"\b(successor|succession)\b", re.IGNORECASE), "succession"),
     # ── general_election_win (explicit election-win language) ─────────────
     # Must come BEFORE next_leader so "be elected president" → general_election_win
     (re.compile(r"\bwin\s+(the\s+)?\w*\s*election\b", re.IGNORECASE), "general_election_win"),
@@ -310,7 +354,7 @@ def extract_semantics(question: str) -> MarketSemantics:
         party=_extract_party(question),
         office=_extract_office(question),
         jurisdiction=_extract_jurisdiction(question),
-        departure_method=_extract_departure_method(question) if event_type == "leave_office" else None,
+        departure_method=_extract_departure_method(question) if event_type in ("leave_office", "resignation_removal") else None,
     )
 
 
@@ -344,18 +388,22 @@ def semantics_compatible(a: MarketSemantics, b: MarketSemantics) -> tuple[bool, 
             return False, f"entity mismatch: {sorted(a_sur)} vs {sorted(b_sur)}"
 
     # ── Family-specific attribute checks ──────────────────────────────────
-    if family == "nomination":
+    if family in ("nomination", "vp_nomination", "ticket", "declare_run",
+                  "first_to_declare", "election_participation"):
         if a.party and b.party and a.party != b.party:
             return False, f"party mismatch: {a.party!r} vs {b.party!r}"
+        if family in ("election_participation", "declare_run"):
+            if a.office and b.office and a.office != b.office:
+                return False, f"office mismatch: {a.office!r} vs {b.office!r}"
 
-    elif family in ("general_election_win", "next_leader"):
+    elif family in ("general_election_win", "next_leader", "succession"):
         if a.office and b.office and a.office != b.office:
             return False, f"office mismatch: {a.office!r} vs {b.office!r}"
         if a.jurisdiction and b.jurisdiction and a.jurisdiction != b.jurisdiction:
             return False, f"jurisdiction mismatch: {a.jurisdiction!r} vs {b.jurisdiction!r}"
 
-    elif family == "leave_office":
-        # resign vs impeach are mutually exclusive; "leave office" (→ None) is compatible with both
+    elif family in ("leave_office", "resignation_removal"):
+        # resign vs impeach are mutually exclusive; absence of method is compatible with either
         if a.departure_method and b.departure_method and a.departure_method != b.departure_method:
             return False, (
                 f"departure_method mismatch: {a.departure_method!r} vs {b.departure_method!r}"

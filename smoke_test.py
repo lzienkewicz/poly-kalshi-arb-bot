@@ -49,9 +49,15 @@ FAMILIES = [
     "nomination",
     "ticket",
     "vp_nomination",
+    "first_to_declare",
+    "endorsement",
+    "declare_run",
+    "election_participation",
     "general_election_win",
     "next_leader",
     "leave_office",
+    "resignation_removal",
+    "succession",
     "appointment",
     "legislation",
     "other",
@@ -99,7 +105,7 @@ def _analyze_family(family: str, p_markets: list, k_markets: list) -> None:
         print("  (Only one venue has markets in this family — no pairs to evaluate)")
         return
 
-    # ── Stage A: time window + Jaccard pre-filter ──────────────────────────
+    # ── Stage A: time window + pre-Jaccard gate + Jaccard floor ───────────
     candidates, counts = generate_candidates(
         p_markets,
         k_markets,
@@ -108,9 +114,17 @@ def _analyze_family(family: str, p_markets: list, k_markets: list) -> None:
         deadline_window=POLITICS_DEADLINE_WINDOW,
         jaccard_min=JACCARD_MIN,
         now=NOW,
+        enable_politics_gates=True,
     )
     print(
-        f"  Jaccard≥{JACCARD_MIN} candidates: {counts.final_candidates}"
+        f"  Pre-gate dropped:        {counts.pre_jaccard_gate_dropped}"
+        f"  (empty_entity, cardinality, office, jurisdiction, family mismatches)"
+    )
+    if counts.pre_jaccard_gate_reasons:
+        for reason, cnt in sorted(counts.pre_jaccard_gate_reasons.items(), key=lambda x: -x[1]):
+            print(f"    {cnt:5d}x  {reason}")
+    print(
+        f"  Jaccard≥threshold cands: {counts.final_candidates}"
         f"  (time-skipped={counts.time_skipped}, jac-dropped={counts.jaccard_floor_dropped})"
     )
 
@@ -239,7 +253,8 @@ async def main() -> None:
     print("MARKET COUNTS BY EVENT FAMILY")
     print("=" * 70)
     print(f"  {'Family':25s}  {'Poly':>6s}  {'Kalshi':>6s}")
-    for fam in FAMILIES:
+    all_families = set(poly_by_family) | set(kalshi_by_family)
+    for fam in FAMILIES + sorted(all_families - set(FAMILIES)):
         n_p = len(poly_by_family.get(fam, []))
         n_k = len(kalshi_by_family.get(fam, []))
         if n_p + n_k > 0:
@@ -247,8 +262,22 @@ async def main() -> None:
             print(f"  {fam:25s}  {n_p:6d}  {n_k:6d}{both}")
     print(f"  {'TOTAL':25s}  {len(poly_pol):6d}  {len(kalshi_pol):6d}")
 
+    # ── Malformed / empty-entity markets ──────────────────────────────────
+    poly_empty = [m for m in poly_pol if extract_semantics(m.question).cardinality == 0]
+    kalshi_empty = [m for m in kalshi_pol if extract_semantics(m.question).cardinality == 0]
+    print(f"\n  Malformed/empty-entity: poly={len(poly_empty)}  kalshi={len(kalshi_empty)}")
+    if poly_empty:
+        print("  Sample poly (no entity extracted):")
+        for m in poly_empty[:3]:
+            print(f"    {m.question[:75]!r}")
+    if kalshi_empty:
+        print("  Sample kalshi (no entity extracted):")
+        for m in kalshi_empty[:3]:
+            print(f"    {m.question[:75]!r}")
+
     # ── Per-family analysis ────────────────────────────────────────────────
-    for family in FAMILIES:
+    analysis_families = FAMILIES + sorted(all_families - set(FAMILIES))
+    for family in analysis_families:
         p_markets = poly_by_family.get(family, [])
         k_markets = kalshi_by_family.get(family, [])
         if not p_markets and not k_markets:

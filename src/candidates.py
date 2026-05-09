@@ -21,6 +21,7 @@ import structlog
 
 from src.models.market import Market
 from src.normalization import normalize_market
+from src.semantic import MarketSemantics, extract_semantics
 
 log = structlog.get_logger(__name__)
 
@@ -31,6 +32,17 @@ SportsSubdomain = Literal[
 
 _DEFAULT_DEADLINE_WINDOW = timedelta(hours=48)
 _JACCARD_MIN = 0.15
+
+# Per-family Jaccard floors for the politics domain (lower = higher recall for tight families).
+# Families absent from this map use _POLITICS_JACCARD_DEFAULT.
+_POLITICS_JACCARD_BY_FAMILY: dict[str, float] = {
+    "nomination": 0.10,
+    "vp_nomination": 0.10,
+    "ticket": 0.10,
+    "next_leader": 0.15,
+    "other": 0.30,
+}
+_POLITICS_JACCARD_DEFAULT: float = 0.15
 
 
 # ---------------------------------------------------------------------------
@@ -261,8 +273,49 @@ class StageCount:
     poly_simple: int = 0
     kalshi_simple: int = 0
     time_skipped: int = 0
+    pre_jaccard_gate_dropped: int = 0
+    pre_jaccard_gate_reasons: dict[str, int] = field(default_factory=dict)
     jaccard_floor_dropped: int = 0
     final_candidates: int = 0
+    # Politics-specific diagnostics (populated when enable_politics_gates=True)
+    poly_family_counts: dict[str, int] = field(default_factory=dict)
+    kalshi_family_counts: dict[str, int] = field(default_factory=dict)
+    poly_empty_entities: int = 0
+    kalshi_empty_entities: int = 0
+
+
+# ---------------------------------------------------------------------------
+# Politics pre-Jaccard gate
+# ---------------------------------------------------------------------------
+
+def _politics_pre_jaccard_gate(
+    psem: MarketSemantics,
+    ksem: MarketSemantics,
+) -> tuple[bool, str]:
+    """Hard gates applied before Jaccard scoring for politics market pairs.
+
+    Returns (passed, reason_code). Reason codes are used for diagnostics.
+    Checks are intentionally conservative — only reject when BOTH sides
+    supply enough information to confirm incompatibility.
+    """
+    if psem.cardinality == 0 and ksem.cardinality == 0:
+        return False, "empty_entity"
+
+    if psem.cardinality > 0 and ksem.cardinality > 0:
+        if psem.cardinality != ksem.cardinality:
+            return False, "cardinality_mismatch"
+
+    if psem.event_type != "other" and ksem.event_type != "other":
+        if psem.event_type != ksem.event_type:
+            return False, "family_mismatch"
+
+    if psem.office and ksem.office and psem.office != ksem.office:
+        return False, "office_mismatch"
+
+    if psem.jurisdiction and ksem.jurisdiction and psem.jurisdiction != ksem.jurisdiction:
+        return False, "jurisdiction_mismatch"
+
+    return True, ""
 
 
 # ---------------------------------------------------------------------------
@@ -278,8 +331,14 @@ def generate_candidates(
     deadline_window: timedelta = _DEFAULT_DEADLINE_WINDOW,
     jaccard_min: float = _JACCARD_MIN,
     now: datetime,
+    enable_politics_gates: bool = False,
 ) -> tuple[list[CandidatePair], StageCount]:
-    """Filter and pair markets, returning candidates sorted by Jaccard desc."""
+    """Filter and pair markets, returning candidates sorted by Jaccard desc.
+
+    When domain=="politics" or enable_politics_gates=True, a pre-Jaccard gate
+    is applied (entity/cardinality/office/jurisdiction/family checks) and
+    per-family Jaccard thresholds override jaccard_min.
+    """
     counts = StageCount(
         poly_fetched=len(poly_markets),
         kalshi_fetched=len(kalshi_markets),
@@ -321,9 +380,28 @@ def generate_candidates(
     poly_canon = [(normalize_market(m), m) for m in poly_s]
     kalshi_canon = [(normalize_market(m), m) for m in kalshi_s]
 
-    # Stage 5: time window + Stage 6: Jaccard floor
+    # Pre-compute semantics and family/empty-entity diagnostics when gate is active
+    gate_active = domain == "politics" or enable_politics_gates
+    poly_sems: dict[str, MarketSemantics] = {}
+    kalshi_sems: dict[str, MarketSemantics] = {}
+    if gate_active:
+        for _, m in poly_canon:
+            sem = extract_semantics(m.question)
+            poly_sems[m.venue_market_id] = sem
+            counts.poly_family_counts[sem.event_type] = counts.poly_family_counts.get(sem.event_type, 0) + 1
+            if sem.cardinality == 0:
+                counts.poly_empty_entities += 1
+        for _, m in kalshi_canon:
+            sem = extract_semantics(m.question)
+            kalshi_sems[m.venue_market_id] = sem
+            counts.kalshi_family_counts[sem.event_type] = counts.kalshi_family_counts.get(sem.event_type, 0) + 1
+            if sem.cardinality == 0:
+                counts.kalshi_empty_entities += 1
+
+    # Stage 5: time window + optional pre-Jaccard gate + Stage 6: Jaccard floor
     pairs: list[CandidatePair] = []
     time_skipped = 0
+    gate_dropped = 0
     jaccard_dropped = 0
 
     for cp, poly in poly_canon:
@@ -334,8 +412,24 @@ def generate_candidates(
             if abs(poly_deadline - kalshi_deadline) > deadline_window:
                 time_skipped += 1
                 continue
+
+            if gate_active:
+                psem = poly_sems[poly.venue_market_id]
+                ksem = kalshi_sems[kalshi.venue_market_id]
+                gate_ok, gate_reason = _politics_pre_jaccard_gate(psem, ksem)
+                if not gate_ok:
+                    gate_dropped += 1
+                    counts.pre_jaccard_gate_reasons[gate_reason] = (
+                        counts.pre_jaccard_gate_reasons.get(gate_reason, 0) + 1
+                    )
+                    continue
+                family = psem.event_type if psem.event_type != "other" else ksem.event_type
+                effective_jac_min = _POLITICS_JACCARD_BY_FAMILY.get(family, _POLITICS_JACCARD_DEFAULT)
+            else:
+                effective_jac_min = jaccard_min
+
             j = _jaccard(cp.question_tokens, ck.question_tokens)
-            if j < jaccard_min:
+            if j < effective_jac_min:
                 jaccard_dropped += 1
                 continue
             kalshi_days = (kalshi_deadline - now).total_seconds() / 86400
@@ -347,6 +441,7 @@ def generate_candidates(
                 kalshi_days=kalshi_days,
             ))
 
+    counts.pre_jaccard_gate_dropped = gate_dropped
     counts.time_skipped = time_skipped
     counts.jaccard_floor_dropped = jaccard_dropped
     counts.final_candidates = len(pairs)
@@ -359,6 +454,7 @@ def generate_candidates(
         poly_simple=counts.poly_simple,
         kalshi_simple=counts.kalshi_simple,
         time_skipped=time_skipped,
+        gate_dropped=gate_dropped,
         jaccard_dropped=jaccard_dropped,
         final_candidates=counts.final_candidates,
     )
