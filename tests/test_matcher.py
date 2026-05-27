@@ -445,21 +445,17 @@ def test_same_question_different_resolver_rejected(tmp_path):
 
 
 def test_question_with_number_variants_not_exact(tmp_path):
-    # "5.25%" vs "5.50%" — numeric difference in threshold
+    # "5.25%" vs "5.50%" — numeric difference means these are different markets.
+    # Without approval the pair must NOT be promoted to EXACT.
+    # Tokens shared: "fed", "funds", "rate", "exceed", "2025" → 5
+    # Unique to each:  "525" (poly) vs "550" (kalshi)          → 2
+    # Jaccard = 5/7 ≈ 0.71 — below the 0.85 EXACT threshold → PROBABLE only.
     p = _poly(question="Will Fed funds rate exceed 5.25% in 2025?", resolution_source=None)
     k = _kalshi(question="Will Fed funds rate exceed 5.50% in 2025?", resolution_source=None, close_time=_T0)
-    ap = _approved(tmp_path, poly_id="0xfed111", kalshi_id="KXFED-25JUN-T5.25")
+    ap = _empty_pairs(tmp_path)
     result = match(p, k, approved_pairs_path=ap)
-    # Even if approved, Jaccard will differ due to different number tokens
-    # Must not be EXACT match (and if it is, it's the allowlist that decides, not the numbers)
-    # — the important thing is the test verifies the pair_key check
-    # The pair_key is "0xfed111::KXFED-25JUN-T5.25" — correct IDs for the approved file
-    # So allowlist passes, but the questions differ on one number token → Jaccard might still be EXACT
-    # This tests that even with approval, the semantic score matters
-    # Here both questions share: "fed", "funds", "rate", "exceed", "2025"
-    # Difference: "525" vs "550" (after normalization strips %)
-    # intersection = 5, union = 7, jaccard = 5/7 ≈ 0.71 → PROBABLE not EXACT
-    assert result.confidence != MatchConfidence.EXACT or result.is_tradeable is False or result.reject_reason is not None
+    assert result.confidence != MatchConfidence.EXACT
+    assert not result.is_tradeable
 
 
 def test_misleading_subset_question_rejected(tmp_path):

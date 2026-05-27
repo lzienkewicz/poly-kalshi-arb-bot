@@ -107,7 +107,20 @@ _LEAD_RE = re.compile(
     re.IGNORECASE,
 )
 
+# "Trump out as President by end of year?" / "Putin out as Russia's President?"
+# Captures leading proper-name run before "out as" (departure framing).
+_OUT_AS_RE = re.compile(
+    r"^([A-Z][A-Za-z.']*(?:\s+[A-Z][A-Za-z.']*)*)\s+out\s+as\b"
+)
+
 _SUFFIX_WORDS: frozenset[str] = frozenset({"jr", "sr", "ii", "iii", "iv"})
+
+# Transliteration / spelling variant aliases: map alternate spelling → canonical.
+# Used so different venues' romanizations of the same name still match.
+_ENTITY_ALIASES: dict[str, str] = {
+    "eizenkot": "eisenkot",   # Gadi Eizenkot / Gadi Eisenkot
+    "eisenkot": "eisenkot",
+}
 
 
 def _normalize_entity(name: str) -> str:
@@ -115,13 +128,16 @@ def _normalize_entity(name: str) -> str:
 
     Removes periods and middle initials (single-char tokens) but preserves
     generational suffixes so "Donald Trump Jr." != "Donald Trump".
+    Applies transliteration aliases so spelling variants resolve to a single form.
 
     "Donald Trump Jr."    -> "donald trump jr"
     "Donald J. Trump Jr." -> "donald trump jr"
     "Donald Trump"        -> "donald trump"
+    "Gadi Eizenkot"       -> "gadi eisenkot"
     """
     name = name.strip().lower().replace(".", "")
     tokens = [t for t in name.split() if len(t) > 1 or t in _SUFFIX_WORDS]
+    tokens = [_ENTITY_ALIASES.get(t, t) for t in tokens]
     return " ".join(tokens)
 
 
@@ -143,6 +159,12 @@ def _extract_entities(question: str) -> list[str]:
         if entities:
             return entities
     m = _LEAD_RE.match(question)
+    if m:
+        entities = _split_subject(m.group(1))
+        if entities:
+            return entities
+    # Departure framing: "Trump out as President by end of year?"
+    m = _OUT_AS_RE.match(question)
     if m:
         entities = _split_subject(m.group(1))
         if entities:
@@ -356,6 +378,51 @@ def extract_semantics(question: str) -> MarketSemantics:
         jurisdiction=_extract_jurisdiction(question),
         departure_method=_extract_departure_method(question) if event_type in ("leave_office", "resignation_removal") else None,
     )
+
+
+def is_structural_exact(a: MarketSemantics, b: MarketSemantics) -> bool:
+    """True when all extracted structured fields agree positively.
+
+    Used by the matcher to promote PROBABLE → EXACT when questions use
+    different vocabulary but describe the same real-world event.
+
+    Requires:
+    - Both have a known event_type (not "other") and they match
+    - Both have at least one entity with matching surnames
+    - First-name tokens do not conflict when both sides have multi-word names
+    - party, office, jurisdiction all agree when both sides have data
+    """
+    if a.event_type == "other" or b.event_type == "other":
+        return False
+    if a.event_type != b.event_type:
+        return False
+    if not a.entities or not b.entities:
+        return False
+
+    a_sur = _surnames(a.entities)
+    b_sur = _surnames(b.entities)
+    if a_sur != b_sur:
+        return False
+
+    # Conflict check for single-entity markets: "Donald Trump" vs "Ivanka Trump"
+    # share a surname but are different people; catch this via first-name disagreement.
+    if len(a.entities) == 1 and len(b.entities) == 1:
+        a_name = next(iter(a.entities))
+        b_name = next(iter(b.entities))
+        a_parts = [t for t in a_name.split() if t not in _SUFFIX_WORDS]
+        b_parts = [t for t in b_name.split() if t not in _SUFFIX_WORDS]
+        if len(a_parts) >= 2 and len(b_parts) >= 2:
+            if a_parts[0] != b_parts[0]:
+                return False
+
+    if a.party and b.party and a.party != b.party:
+        return False
+    if a.office and b.office and a.office != b.office:
+        return False
+    if a.jurisdiction and b.jurisdiction and a.jurisdiction != b.jurisdiction:
+        return False
+
+    return True
 
 
 def semantics_compatible(a: MarketSemantics, b: MarketSemantics) -> tuple[bool, str]:

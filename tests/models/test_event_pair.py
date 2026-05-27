@@ -75,6 +75,7 @@ def test_reject_reason_codes_are_complete():
         "EQUIV_CONDITIONAL_MISMATCH",
         "EQUIV_CONFIDENCE_NOT_EXACT",
         "EQUIV_NOT_IN_APPROVED_PAIRS",
+        "EQUIV_STRUCTURAL_EXACT_NOT_IN_PAIRS",
     }
     assert REJECT_REASON_CODES == expected
 

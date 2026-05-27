@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 import structlog
 
 from src.models.market import Market
-from src.models.orderbook import OrderBook
+from src.models.orderbook import BookLevel, BookSide, OrderBook
 from src.venues.polymarket._parser import (
     extract_book,
     extract_market,
@@ -174,3 +174,113 @@ class PolymarketAdapter:
         as the Kalshi adapter but don't need to distinguish depth from price.
         """
         return await self.fetch_orderbooks(condition_id, yes_token_id, no_token_id)
+
+    # ------------------------------------------------------------------
+    # Condition-ID resolver (correct lookup for 0x... hex IDs)
+    # ------------------------------------------------------------------
+
+    async def resolve_market_by_condition_id(self, condition_id: str) -> Market | None:
+        """Look up a Polymarket market by its on-chain condition_id.
+
+        The Gamma path endpoint (/markets/{id}) returns HTTP 422 for hex condition
+        IDs — it expects an internal integer ID.  This method uses the correct
+        approach: a query-parameter filter (?condition_id=0x...) on /markets.
+
+        Returns None when the market is not found or on any fetch error.
+        """
+        try:
+            raw = await self._client.get_market_by_condition_id(condition_id)
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "poly_condition_id_resolve_error",
+                condition_id=condition_id[:20],
+                error=str(exc)[:120],
+            )
+            return None
+
+        if not raw:
+            log.warning("poly_condition_id_not_found", condition_id=condition_id[:20])
+            return None
+
+        try:
+            parsed = extract_market(raw)
+            market = to_market(parsed)
+        except (KeyError, ValueError, TypeError) as exc:
+            log.warning(
+                "poly_condition_id_parse_error",
+                condition_id=condition_id[:20],
+                error=str(exc)[:120],
+            )
+            return None
+
+        log.debug(
+            "poly_condition_id_resolved",
+            condition_id=condition_id[:20],
+            question=market.question[:60],
+            is_open=market.is_open,
+        )
+        return market
+
+    # ------------------------------------------------------------------
+    # Gamma-price fallback (when CLOB orderbook fetch fails)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def build_orderbooks_from_gamma_prices(
+        condition_id: str,
+        market_raw: dict,
+    ) -> tuple[OrderBook, OrderBook]:
+        """Build synthetic YES/NO OrderBooks from Gamma market-level price fields.
+
+        Used when the CLOB /book endpoint is unavailable.  Sizes are 0 (depth
+        unknown); depth checks in the edge calculator will reject these books,
+        but implied probabilities and raw-edge diagnostics remain meaningful.
+
+        Price field precedence:
+          bestAsk / bestBid  → direct YES ask/bid
+          lastTradePrice      → crude ±1¢ spread around last price
+          Absent              → empty book (no price available)
+        """
+        snapshot_ts = datetime.now(timezone.utc)
+
+        def _parse(v: object) -> float | None:
+            try:
+                return float(v)  # type: ignore[arg-type]
+            except (TypeError, ValueError):
+                return None
+
+        yes_ask = _parse(market_raw.get("bestAsk") or market_raw.get("best_ask"))
+        yes_bid = _parse(market_raw.get("bestBid") or market_raw.get("best_bid"))
+
+        if yes_ask is None and yes_bid is None:
+            last = _parse(
+                market_raw.get("lastTradePrice") or market_raw.get("last_trade_price")
+            )
+            if last is not None:
+                yes_ask = min(last + 0.01, 1.0)
+                yes_bid = max(last - 0.01, 0.0)
+
+        # NO side is complementary in a binary market
+        no_ask = (1.0 - yes_bid) if yes_bid is not None else None
+        no_bid = (1.0 - yes_ask) if yes_ask is not None else None
+
+        def _make_book(outcome: str, ask: float | None, bid: float | None) -> OrderBook:
+            asks = (
+                BookSide(levels=[BookLevel(price=ask, size=0.0)])
+                if ask is not None and 0.0 < ask <= 1.0
+                else BookSide()
+            )
+            bids = (
+                BookSide(levels=[BookLevel(price=bid, size=0.0)])
+                if bid is not None and 0.0 <= bid < 1.0
+                else BookSide()
+            )
+            return OrderBook(
+                venue_market_id=condition_id,
+                outcome=outcome,
+                asks=asks,
+                bids=bids,
+                snapshot_ts=snapshot_ts,
+            )
+
+        return _make_book("YES", yes_ask, yes_bid), _make_book("NO", no_ask, no_bid)

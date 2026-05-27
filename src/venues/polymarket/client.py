@@ -128,6 +128,25 @@ class PolymarketClient:
             return result[0] if result else {}
         return result
 
+    async def get_market_by_condition_id(self, condition_id: str) -> dict[str, Any]:
+        """Look up a market by its on-chain condition_id using the Gamma filter parameter.
+
+        The Gamma path endpoint (/markets/{id}) expects an internal integer ID, not a
+        hex condition_id — it returns HTTP 422 for 0x... strings.  The correct way to
+        look up by condition_id is as a query parameter.
+
+        Returns the first matching market dict, or an empty dict when not found.
+        """
+        result = await self._get(
+            "/markets",
+            params={"condition_id": condition_id},
+            base_url=self._gamma_url,
+        )
+        markets = result if isinstance(result, list) else (
+            result.get("data") or result.get("markets") or []
+        )
+        return markets[0] if markets else {}
+
     async def get_book(self, token_id: str) -> dict[str, Any]:
         """Fetch the full order book for a token (YES or NO side) from the CLOB API."""
         result = await self._get("/book", params={"token_id": token_id}, base_url=self._clob_url)

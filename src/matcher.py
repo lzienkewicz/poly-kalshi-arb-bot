@@ -45,7 +45,7 @@ import structlog
 from src.models.event_pair import EventPair, MatchConfidence, MatchStatus
 from src.models.market import Market
 from src.normalization import CanonicalMarket, normalize_market
-from src.semantic import extract_semantics, semantics_compatible
+from src.semantic import extract_semantics, is_structural_exact, semantics_compatible
 
 log = structlog.get_logger(__name__)
 
@@ -236,8 +236,11 @@ def _evaluate(
     if not sem_ok:
         return _reject("EQUIV_SEMANTIC_MISMATCH", sem_detail)
 
+    # Structural exact: all extracted fields agree positively — promotes PROBABLE → EXACT
+    structural_exact = is_structural_exact(poly_sem, kalshi_sem)
+
     # ── Jaccard-based confidence ───────────────────────────────────────────
-    confidence, inverted = _semantic_match(canon_poly, canon_kalshi)
+    confidence, inverted = _semantic_match(canon_poly, canon_kalshi, structural_exact)
 
     if confidence == MatchConfidence.UNKNOWN:
         return EventPair(
@@ -261,6 +264,18 @@ def _evaluate(
 
     # PROBABLE or EXACT — not in approved_pairs (would have returned above)
     if confidence == MatchConfidence.EXACT:
+        if structural_exact:
+            # All structured fields agree — keep EXACT confidence for human promotion
+            return EventPair(
+                polymarket=poly,
+                kalshi=kalshi,
+                status=MatchStatus.REJECTED,
+                confidence=MatchConfidence.EXACT,
+                directions_inverted=inverted,
+                reject_reason="EQUIV_STRUCTURAL_EXACT_NOT_IN_PAIRS",
+                reject_detail=f"Structural exact: add {pair_key!r} to approved_pairs.json after review",
+            )
+        # Jaccard-only exact — not structurally verified, downgrade to PROBABLE
         return EventPair(
             polymarket=poly,
             kalshi=kalshi,
@@ -291,12 +306,17 @@ def _evaluate(
 def _semantic_match(
     canon_poly: CanonicalMarket,
     canon_kalshi: CanonicalMarket,
+    structural_exact: bool = False,
 ) -> tuple[MatchConfidence, bool]:
     """Return (confidence, directions_inverted).
 
     directions_inverted is True when one question contains negation signals
     that the other does not — implying the YES sides resolve under opposite
     scenarios and the Kalshi leg must be flipped.
+
+    structural_exact=True promotes any non-UNKNOWN result to EXACT so that
+    pairs with matching entity/family/party/office/jurisdiction are not held
+    back by Jaccard alone (different question wording, same real-world event).
     """
     # Exact normalized string match is the strongest signal
     exact_string = canon_poly.question_normalized == canon_kalshi.question_normalized
@@ -314,6 +334,11 @@ def _semantic_match(
         confidence = MatchConfidence.POSSIBLE
     else:
         confidence = MatchConfidence.UNKNOWN
+
+    # Structural exact promotes POSSIBLE/PROBABLE → EXACT when all fields agree,
+    # but only when there is at least some token overlap (zero-overlap = suspicious).
+    if structural_exact and confidence not in (MatchConfidence.UNKNOWN,):
+        confidence = MatchConfidence.EXACT
 
     inverted = _directions_inverted(canon_poly.question_normalized, canon_kalshi.question_normalized)
     return confidence, inverted
